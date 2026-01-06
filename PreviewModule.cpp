@@ -256,8 +256,8 @@ void main() {
     } else {
         // Compress to SDR range: clamp to sdrWhitePointRatio
         vec3 clamped = min(color.rgb, vec3(u_sdrWhitePointRatio));
-        // Reduce 50% brightness
-        o_color = vec4(clamped * 0.5, color.a);
+        // Reduce 70% brightness
+        o_color = vec4(clamped * 0.3, color.a);
     }
 }
 )";
