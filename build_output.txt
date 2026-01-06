@@ -1,0 +1,5 @@
+閫傜敤浜?.NET Framework MSBuild 鐗堟湰 17.14.23+b0019275e
+
+  PreviewModule.cpp
+  printscr.vcxproj -> D:\dev\printscr\build\Release\printscr.exe
+  Building Custom Rule D:/dev/printscr/CMakeLists.txt

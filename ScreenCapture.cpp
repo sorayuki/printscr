@@ -1,4 +1,5 @@
 #include "ScreenCapture.h"
+#include "Logger.h"
 
 #include <atomic>
 #include <d3d11.h>
@@ -72,14 +73,17 @@ void ScreenCapturerImpl::InitializeDevice() {
       D3D_FEATURE_LEVEL_10_0,
   };
 
+  LOG("Initializing D3D11 device...");
   HRESULT hr = D3D11CreateDevice(
       nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, creationFlags, featureLevels,
       ARRAYSIZE(featureLevels), D3D11_SDK_VERSION, d3d_device.GetAddressOf(),
       nullptr, d3d_context.GetAddressOf());
 
   if (FAILED(hr)) {
+    LOG("Failed to create D3D11 device. HR=" + std::to_string(hr));
     throw std::runtime_error("Failed to create D3D11 device");
   }
+  LOG("D3D11 device created.");
 
   // Create WinRT Wrapper for D3D11 Device
   Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
@@ -126,13 +130,16 @@ void ScreenCapturerImpl::StartCapture() {
 
   try {
     item = CreateCaptureItemForPrimaryMonitor();
-    last_size = item.Size();
+    LOG("Capture item created. Size=" + std::to_string(last_size.Width) + "x" +
+        std::to_string(last_size.Height));
 
     // Create Frame Pool
     // Use scRGB format (R16G16B16A16Float - FP16) which is 64 bits per pixel
+    LOG("Creating FramePool...");
     frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
         device_winrt, DirectXPixelFormat::R16G16B16A16Float, 2, last_size);
 
+    LOG("Creating CaptureSession...");
     session = frame_pool.CreateCaptureSession(item);
 
     frame_arrived_revoker = frame_pool.FrameArrived(
@@ -140,6 +147,7 @@ void ScreenCapturerImpl::StartCapture() {
 
     session.IsCursorCaptureEnabled(false);
     session.StartCapture();
+    LOG("Capture session started.");
     is_capturing = true;
   } catch (winrt::hresult_error const &ex) {
     std::cerr << "StartCapture failed: " << winrt::to_string(ex.message())
@@ -173,8 +181,10 @@ void ScreenCapturerImpl::OnFrameArrived(
     Direct3D11CaptureFramePool const &sender,
     winrt::Windows::Foundation::IInspectable const &) {
   auto frame = sender.TryGetNextFrame();
-  if (!frame)
+  if (!frame) {
+    // LOG("OnFrameArrived: Frame is null");
     return;
+  }
 
   auto contentSize = frame.ContentSize();
   // Check for resize

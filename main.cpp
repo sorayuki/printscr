@@ -1,3 +1,4 @@
+#include "Logger.h"
 #include "PreviewModule.h"
 #include "ScreenCapture.h"
 #include <chrono>
@@ -7,15 +8,20 @@
 #include <winrt/base.h>
 
 int main() {
+  Logger::Init("printscr.log");
+  LOG("Application started.");
+
   // Declare High DPI support
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  LOG("High DPI awareness set.");
 
   winrt::init_apartment();
-
-  std::cout << "Printscr started." << std::endl;
+  LOG("WinRT apartment initialized.");
 
   try {
+    LOG("Creating ScreenCapturer...");
     auto capturer = ScreenCapturer::Create();
+    LOG("Starting capture...");
     capturer->StartCapture();
     std::cout << "Capture started. Waiting for first frame..." << std::endl;
 

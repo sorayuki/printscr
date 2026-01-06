@@ -1,4 +1,5 @@
 #include "PreviewModule.h"
+#include "Logger.h"
 #include "SystemInfo.h"
 
 #include <EGL/egl.h>
@@ -19,15 +20,31 @@ public:
   ~PreviewWindowImpl() { Cleanup(); }
 
   SelectionRect Show(std::shared_ptr<CapturedFrame> frame) override {
+    LOG("PreviewWindow::Show called.");
     m_frame = frame;
     m_hdrInfo = SystemInfo::GetPrimaryDisplayHdrInfo();
+    LOG("HDR Info: SDR White Level=" + std::to_string(m_hdrInfo.sdrWhiteLevel));
 
-    if (!CreateWin32Window())
+    LOG("Creating Win32 window...");
+    if (!CreateWin32Window()) {
+      LOG("Failed to create Win32 window.");
       return {};
-    if (!InitEGL())
+    }
+    LOG("Window created.");
+
+    LOG("Initializing EGL...");
+    if (!InitEGL()) {
+      LOG("Failed to initialize EGL.");
       return {};
-    if (!InitGL())
+    }
+    LOG("EGL initialized.");
+
+    LOG("Initializing GL...");
+    if (!InitGL()) {
+      LOG("Failed to initialize GL.");
       return {};
+    }
+    LOG("GL initialized.");
 
     m_running = true;
     m_selectionConfirmed = false;
@@ -35,10 +52,12 @@ public:
     // Center the initial selection (optional, or start empty)
     m_selection = {0, 0, 0, 0};
 
+    LOG("Entering message loop...");
     MSG msg;
     while (m_running) {
       while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) {
+          LOG("WM_QUIT received.");
           m_running = false;
           break;
         }
@@ -47,14 +66,18 @@ public:
       }
 
       Render();
-      eglSwapBuffers(m_display, m_surface);
+      if (!eglSwapBuffers(m_display, m_surface)) {
+        LOG("eglSwapBuffers failed.");
+      }
 
       // Reduce CPU usage if not moving/changing, but for a screenshot tool
       // simple 60fps or on-demand is fine.
       Sleep(16);
     }
 
+    LOG("Exiting message loop. Cleaning up...");
     Cleanup();
+    LOG("Cleanup done. Show returning.");
     return m_selectionConfirmed ? m_selection : SelectionRect{0, 0, 0, 0};
   }
 
@@ -102,10 +125,7 @@ private:
     int r = m_selection.Right();
     int b = m_selection.Bottom();
 
-    const int tolerance =
-        5; // Increased to 5 for better UX, though requirement said 3, let's
-           // stick to 5 or have it as constant. Use 3 as per task if strict.
-    // Task said "暂定允许偏离3像素" (temporarily 3 pixels). Let's use 3.
+    const int tolerance = 5;
     const int tol = 3;
 
     bool hitL = std::abs(x - l) <= tol;
@@ -147,11 +167,13 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
 
   switch (msg) {
   case WM_CREATE: {
+    LOG("WM_CREATE received.");
     CREATESTRUCT *cs = (CREATESTRUCT *)lParam;
     SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
     return 0;
   }
   case WM_KEYDOWN:
+    LOG("WM_KEYDOWN: " + std::to_string(wParam));
     if (wParam == VK_ESCAPE) {
       self->m_selectionConfirmed = false;
       self->m_running = false;
@@ -161,6 +183,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
     return 0;
   case WM_LBUTTONDOWN: {
+    LOG("WM_LBUTTONDOWN");
     int x = LOWORD(lParam);
     int y = HIWORD(lParam);
     self->m_lastMouseX = x;
@@ -268,10 +291,6 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
     return 0;
   }
-  case WM_LBUTTONUP: {
-    self->m_isDragging = false;
-    return 0;
-  }
   case WM_SETCURSOR: {
     // Prevent DefWindowProc from resetting our cursor
     if (LOWORD(lParam) == HTCLIENT) {
@@ -279,12 +298,19 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
     break;
   }
+  case WM_LBUTTONUP: {
+    LOG("WM_LBUTTONUP");
+    self->m_isDragging = false;
+    return 0;
+  }
   case WM_RBUTTONUP: {
+    LOG("WM_RBUTTONUP");
     self->m_selectionConfirmed = true;
     self->m_running = false;
     return 0;
   }
   case WM_DESTROY:
+    LOG("WM_DESTROY received.");
     self->m_running = false;
     PostQuitMessage(0);
     return 0;
