@@ -237,12 +237,18 @@ precision highp float;
 uniform sampler2D u_texture;
 uniform vec4 u_selection; // x1, y1, x2, y2 in normalized coords (0 to 1, top-down)
 uniform float u_sdrWhitePointRatio; // sdrWhitePointNits / 80.0
+uniform bool u_hasSelection;
 in vec2 v_texCoord;
 out vec4 o_color;
 
 void main() {
     vec4 color = texture(u_texture, v_texCoord);
     
+    if (!u_hasSelection) {
+        o_color = color;
+        return;
+    }
+
     float left = min(u_selection.x, u_selection.z);
     float right = max(u_selection.x, u_selection.z);
     float top = min(u_selection.y, u_selection.w);
@@ -256,8 +262,8 @@ void main() {
     } else {
         // Compress to SDR range: clamp to sdrWhitePointRatio
         vec3 clamped = min(color.rgb, vec3(u_sdrWhitePointRatio));
-        // Reduce 70% brightness
-        o_color = vec4(clamped * 0.3, color.a);
+        // Reduce 80% brightness (20% remaining)
+        o_color = vec4(clamped * 0.2, color.a);
     }
 }
 )";
@@ -328,6 +334,9 @@ void PreviewWindowImpl::Render() {
 
   GLint locSdr = glGetUniformLocation(m_program, "u_sdrWhitePointRatio");
   glUniform1f(locSdr, m_hdrInfo.sdrWhiteLevel / 80.0f);
+
+  GLint locHasSelection = glGetUniformLocation(m_program, "u_hasSelection");
+  glUniform1i(locHasSelection, m_selection.IsValid() ? 1 : 0);
 
   glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
   glEnableVertexAttribArray(0);
