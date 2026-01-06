@@ -48,31 +48,43 @@ public:
 
     m_running = true;
     m_selectionConfirmed = false;
-
-    // Center the initial selection (optional, or start empty)
     m_selection = {0, 0, 0, 0};
+    m_frameCount = 0;
+    m_lastHeartbeat = std::chrono::steady_clock::now();
+
+    // Cache cursors
+    m_cursorCross = LoadCursorW(nullptr, (LPCWSTR)IDC_CROSS);
+    m_cursorArrow = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
+    m_cursorSizeNWSE = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZENWSE);
+    m_cursorSizeNESW = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZENESW);
+    m_cursorSizeNS = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZENS);
+    m_cursorSizeWE = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEWE);
+    m_cursorSizeAll = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEALL);
 
     LOG("Entering message loop...");
+    eglSwapInterval(m_display, 1); // Enable VSync
+
     MSG msg;
     while (m_running) {
+      // Process all pending messages
       while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) {
-          LOG("WM_QUIT received.");
           m_running = false;
-          break;
+        } else {
+          TranslateMessage(&msg);
+          DispatchMessage(&msg);
         }
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
       }
+
+      if (!m_running)
+        break;
 
       Render();
+
       if (!eglSwapBuffers(m_display, m_surface)) {
         LOG("eglSwapBuffers failed.");
+        break;
       }
-
-      // Reduce CPU usage if not moving/changing, but for a screenshot tool
-      // simple 60fps or on-demand is fine.
-      Sleep(16);
     }
 
     LOG("Exiting message loop. Cleaning up...");
@@ -115,6 +127,16 @@ private:
 
   int m_lastMouseX = 0;
   int m_lastMouseY = 0;
+  uint32_t m_frameCount = 0;
+  std::chrono::steady_clock::time_point m_lastHeartbeat;
+
+  HCURSOR m_cursorCross = nullptr;
+  HCURSOR m_cursorArrow = nullptr;
+  HCURSOR m_cursorSizeNWSE = nullptr;
+  HCURSOR m_cursorSizeNESW = nullptr;
+  HCURSOR m_cursorSizeNS = nullptr;
+  HCURSOR m_cursorSizeWE = nullptr;
+  HCURSOR m_cursorSizeAll = nullptr;
 
   int GetDragMode(int x, int y) {
     if (!m_selection.IsValid())
@@ -165,6 +187,10 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
   PreviewWindowImpl *self =
       (PreviewWindowImpl *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
 
+  if (!self && msg != WM_CREATE) {
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+  }
+
   switch (msg) {
   case WM_CREATE: {
     LOG("WM_CREATE received.");
@@ -172,6 +198,10 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
     return 0;
   }
+  case WM_CLOSE:
+    LOG("WM_CLOSE received.");
+    self->m_running = false;
+    return 0;
   case WM_KEYDOWN:
     LOG("WM_KEYDOWN: " + std::to_string(wParam));
     if (wParam == VK_ESCAPE) {
@@ -183,7 +213,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
     return 0;
   case WM_LBUTTONDOWN: {
-    LOG("WM_LBUTTONDOWN");
+    // LOG("WM_LBUTTONDOWN");
     int x = LOWORD(lParam);
     int y = HIWORD(lParam);
     self->m_lastMouseX = x;
@@ -262,32 +292,32 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     } else {
       // Update cursor feedback
       int mode = self->GetDragMode(x, y);
-      LPCWSTR cursor = (LPCWSTR)IDC_CROSS;
+      HCURSOR cursor = self->m_cursorCross;
       switch (mode) {
       case 1:
       case 3:
-        cursor = (LPCWSTR)IDC_SIZENWSE;
+        cursor = self->m_cursorSizeNWSE;
         break;
       case 2:
       case 4:
-        cursor = (LPCWSTR)IDC_SIZENESW;
+        cursor = self->m_cursorSizeNESW;
         break;
       case 5:
       case 7:
-        cursor = (LPCWSTR)IDC_SIZENS;
+        cursor = self->m_cursorSizeNS;
         break;
       case 6:
       case 8:
-        cursor = (LPCWSTR)IDC_SIZEWE;
+        cursor = self->m_cursorSizeWE;
         break;
       case 9:
-        cursor = (LPCWSTR)IDC_SIZEALL;
+        cursor = self->m_cursorSizeAll;
         break;
       default:
-        cursor = (LPCWSTR)IDC_CROSS;
+        cursor = self->m_cursorCross;
         break;
       }
-      SetCursor(LoadCursorW(nullptr, cursor));
+      SetCursor(cursor);
     }
     return 0;
   }
@@ -299,7 +329,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     break;
   }
   case WM_LBUTTONUP: {
-    LOG("WM_LBUTTONUP");
+    // LOG("WM_LBUTTONUP");
     self->m_isDragging = false;
     return 0;
   }
@@ -309,8 +339,21 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     self->m_running = false;
     return 0;
   }
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    BeginPaint(hwnd, &ps);
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  case WM_ERASEBKGND:
+    return 1;
   case WM_DESTROY:
     LOG("WM_DESTROY received.");
+    // Do NOT clear GWLP_USERDATA here.
+    // If we clear it, any subsequent messages (like WM_NCDESTROY) processing in
+    // this same window cycle or pending in the queue will retrieve a NULL
+    // 'self' pointer and crash or fail. SetWindowLongPtr(hwnd, GWLP_USERDATA,
+    // 0);
     self->m_running = false;
     PostQuitMessage(0);
     return 0;

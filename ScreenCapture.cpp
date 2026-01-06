@@ -130,6 +130,7 @@ void ScreenCapturerImpl::StartCapture() {
 
   try {
     item = CreateCaptureItemForPrimaryMonitor();
+    last_size = item.Size();
     LOG("Capture item created. Size=" + std::to_string(last_size.Width) + "x" +
         std::to_string(last_size.Height));
 
@@ -150,8 +151,10 @@ void ScreenCapturerImpl::StartCapture() {
     LOG("Capture session started.");
     is_capturing = true;
   } catch (winrt::hresult_error const &ex) {
-    std::cerr << "StartCapture failed: " << winrt::to_string(ex.message())
-              << std::endl;
+    LOG("StartCapture failed (WinRT): " + winrt::to_string(ex.message()));
+    throw;
+  } catch (const std::exception &ex) {
+    LOG("StartCapture failed (std): " + std::string(ex.what()));
     throw;
   }
 }
@@ -174,7 +177,11 @@ void ScreenCapturerImpl::StopCapture() {
   }
 
   item = nullptr;
-  staging_texture.Reset();
+  // Release resources under lock to ensure no on-going usage in OnFrameArrived
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex);
+    staging_texture.Reset();
+  }
 }
 
 void ScreenCapturerImpl::OnFrameArrived(
@@ -209,51 +216,64 @@ void ScreenCapturerImpl::OnFrameArrived(
     D3D11_TEXTURE2D_DESC desc;
     texture->GetDesc(&desc);
 
-    // Create or reuse staging texture
-    if (!staging_texture) {
-      D3D11_TEXTURE2D_DESC stagingDesc = desc;
-      stagingDesc.Usage = D3D11_USAGE_STAGING;
-      stagingDesc.BindFlags = 0;
-      stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-      stagingDesc.MiscFlags = 0;
+    // Use a local ComPtr to hold reference during operation
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> local_staging_texture;
 
-      hr = d3d_device->CreateTexture2D(&stagingDesc, nullptr,
-                                       staging_texture.GetAddressOf());
-      if (FAILED(hr))
+    {
+      std::lock_guard<std::mutex> lock(frame_mutex);
+      if (!is_capturing)
         return;
+
+      // Create or reuse staging texture
+      if (!staging_texture) {
+        D3D11_TEXTURE2D_DESC stagingDesc = desc;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MiscFlags = 0;
+
+        hr = d3d_device->CreateTexture2D(&stagingDesc, nullptr,
+                                         staging_texture.GetAddressOf());
+        if (FAILED(hr))
+          return;
+      }
+      local_staging_texture = staging_texture;
     }
 
-    // Prepare CPU buffer
-    auto newFrame = std::make_shared<CapturedFrame>();
-    newFrame->metadata.width = desc.Width;
-    newFrame->metadata.height = desc.Height;
-    // 8 bytes per pixel (R16G16B16A16_FLOAT)
-    const uint32_t bytesPerPixel = 8;
+    if (SUCCEEDED(hr) && local_staging_texture) {
+      // Prepare CPU buffer
+      auto newFrame = std::make_shared<CapturedFrame>();
+      newFrame->metadata.width = desc.Width;
+      newFrame->metadata.height = desc.Height;
+      // 8 bytes per pixel (R16G16B16A16_FLOAT)
+      const uint32_t bytesPerPixel = 8;
 
-    // Copy to staging
-    d3d_context->CopyResource(staging_texture.Get(), texture.Get());
+      // Copy to staging
+      d3d_context->CopyResource(local_staging_texture.Get(), texture.Get());
 
-    // Map staging to read
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    hr = d3d_context->Map(staging_texture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
-    if (SUCCEEDED(hr)) {
-      newFrame->metadata.rowPitch = desc.Width * bytesPerPixel;
-      newFrame->pixelData.resize(newFrame->metadata.rowPitch * desc.Height);
+      // Map staging to read
+      D3D11_MAPPED_SUBRESOURCE mapped;
+      hr = d3d_context->Map(local_staging_texture.Get(), 0, D3D11_MAP_READ, 0,
+                            &mapped);
+      if (SUCCEEDED(hr)) {
+        newFrame->metadata.rowPitch = desc.Width * bytesPerPixel;
+        newFrame->pixelData.resize(newFrame->metadata.rowPitch * desc.Height);
 
-      uint8_t *src = static_cast<uint8_t *>(mapped.pData);
-      uint8_t *dst = newFrame->pixelData.data();
+        uint8_t *src = static_cast<uint8_t *>(mapped.pData);
+        uint8_t *dst = newFrame->pixelData.data();
 
-      // Copy row by row to remove padding if present
-      for (UINT row = 0; row < desc.Height; ++row) {
-        memcpy(dst, src, newFrame->metadata.rowPitch);
-        dst += newFrame->metadata.rowPitch;
-        src += mapped.RowPitch;
+        // Copy row by row to remove padding if present
+        for (UINT row = 0; row < desc.Height; ++row) {
+          memcpy(dst, src, newFrame->metadata.rowPitch);
+          dst += newFrame->metadata.rowPitch;
+          src += mapped.RowPitch;
+        }
+
+        d3d_context->Unmap(local_staging_texture.Get(), 0);
+
+        std::lock_guard<std::mutex> lock(frame_mutex);
+        latest_frame = newFrame;
       }
-
-      d3d_context->Unmap(staging_texture.Get(), 0);
-
-      std::lock_guard<std::mutex> lock(frame_mutex);
-      latest_frame = newFrame;
     }
   }
 }

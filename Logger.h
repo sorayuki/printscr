@@ -6,7 +6,6 @@
 #include <sstream>
 #include <string>
 
-
 class Logger {
 public:
   static void Init(const std::string &filename) {
@@ -27,9 +26,11 @@ public:
                 1000;
 
       std::stringstream ss;
-      ss << "[" << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S")
-         << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
-         << message << std::endl;
+      struct tm timeinfo;
+      localtime_s(&timeinfo, &time);
+      ss << "[" << std::put_time(&timeinfo, "%Y-%m-%d %H:%M:%S") << "."
+         << std::setfill('0') << std::setw(3) << ms.count() << "] " << message
+         << std::endl;
 
       m_file << ss.str();
       m_file.flush();
