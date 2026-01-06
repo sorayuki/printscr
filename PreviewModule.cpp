@@ -12,7 +12,6 @@
 #include <string>
 #include <vector>
 
-
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 
@@ -329,6 +328,23 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             }
             break;
         }
+        case WM_LBUTTONDBLCLK: {
+            LOG("WM_LBUTTONDBLCLK");
+            int x = LOWORD(lParam);
+            int y = HIWORD(lParam);
+            if (self->m_selection.IsValid()) {
+                int l = self->m_selection.Left();
+                int t = self->m_selection.Top();
+                int r = self->m_selection.Right();
+                int b = self->m_selection.Bottom();
+
+                if (x > l && x < r && y > t && y < b) {
+                    self->m_selectionConfirmed = true;
+                    self->m_running = false;
+                }
+            }
+            return 0;
+        }
         case WM_LBUTTONUP: {
             // LOG("WM_LBUTTONUP");
             self->m_isDragging = false;
@@ -336,7 +352,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         }
         case WM_RBUTTONUP: {
             LOG("WM_RBUTTONUP");
-            self->m_selectionConfirmed = true;
+            self->m_selectionConfirmed = false;
             self->m_running = false;
             return 0;
         }
