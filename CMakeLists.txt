@@ -8,10 +8,15 @@ set(DEPS_DIR "${CMAKE_SOURCE_DIR}/deps")
 
 include_directories(${DEPS_DIR}/include)
 
-add_executable(printscr main.cpp)
+add_executable(printscr main.cpp ScreenCapture.cpp)
 
 # Link Libraries
 target_link_libraries(printscr PRIVATE
+    d3d11
+    dxgi
+    dwmapi
+    windowsapp
+    
     $<$<CONFIG:Debug>:${DEPS_DIR}/debug/lib/libEGL.lib>
     $<$<CONFIG:Debug>:${DEPS_DIR}/debug/lib/libGLESv2.lib>
     $<$<CONFIG:Debug>:${DEPS_DIR}/debug/lib/zlibd.lib>
