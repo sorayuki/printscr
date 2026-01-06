@@ -8,7 +8,7 @@
 #include <winrt/base.h>
 
 int main() {
-    Logger::Init("printscr.log");
+    // Logger::Init("printscr.log");
     LOG("Application started.");
 
     // Declare High DPI support

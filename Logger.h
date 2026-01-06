@@ -2,6 +2,7 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -18,22 +19,22 @@ public:
 
     static void Log(const std::string &message) {
         std::lock_guard<std::mutex> lock(m_mutex);
+
+        auto now = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+
+        std::stringstream ss;
+        struct tm timeinfo;
+        localtime_s(&timeinfo, &time);
+        ss << "[" << std::put_time(&timeinfo, "%Y-%m-%d %H:%M:%S") << "." << std::setfill('0') << std::setw(3)
+           << ms.count() << "] " << message << std::endl;
+
         if (m_file.is_open()) {
-            auto now = std::chrono::system_clock::now();
-            auto time = std::chrono::system_clock::to_time_t(now);
-            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-
-            std::stringstream ss;
-            struct tm timeinfo;
-            localtime_s(&timeinfo, &time);
-            ss << "[" << std::put_time(&timeinfo, "%Y-%m-%d %H:%M:%S") << "." << std::setfill('0') << std::setw(3)
-               << ms.count() << "] " << message << std::endl;
-
             m_file << ss.str();
             m_file.flush();
-
-            // Also print to console for convenience
-            // std::cout << ss.str();
+        } else {
+            std::cout << ss.str();
         }
     }
 
