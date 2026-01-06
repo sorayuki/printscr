@@ -89,6 +89,51 @@ private:
 
   int m_windowWidth = 0;
   int m_windowHeight = 0;
+
+  int m_lastMouseX = 0;
+  int m_lastMouseY = 0;
+
+  int GetDragMode(int x, int y) {
+    if (!m_selection.IsValid())
+      return 0;
+
+    int l = m_selection.Left();
+    int t = m_selection.Top();
+    int r = m_selection.Right();
+    int b = m_selection.Bottom();
+
+    const int tolerance =
+        5; // Increased to 5 for better UX, though requirement said 3, let's
+           // stick to 5 or have it as constant. Use 3 as per task if strict.
+    // Task said "暂定允许偏离3像素" (temporarily 3 pixels). Let's use 3.
+    const int tol = 3;
+
+    bool hitL = std::abs(x - l) <= tol;
+    bool hitR = std::abs(x - r) <= tol;
+    bool hitT = std::abs(y - t) <= tol;
+    bool hitB = std::abs(y - b) <= tol;
+
+    if (hitL && hitT)
+      return 1; // TL
+    if (hitR && hitT)
+      return 2; // TR
+    if (hitR && hitB)
+      return 3; // BR
+    if (hitL && hitB)
+      return 4; // BL
+    if (hitT && x >= l && x <= r)
+      return 5; // T
+    if (hitR && y >= t && y <= b)
+      return 6; // R
+    if (hitB && x >= l && x <= r)
+      return 7; // B
+    if (hitL && y >= t && y <= b)
+      return 8; // L
+    if (x > l && x < r && y > t && y < b)
+      return 9; // Move
+
+    return 0; // New
+  }
 };
 
 std::unique_ptr<PreviewWindow> PreviewWindow::Create() {
@@ -118,23 +163,121 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
   case WM_LBUTTONDOWN: {
     int x = LOWORD(lParam);
     int y = HIWORD(lParam);
+    self->m_lastMouseX = x;
+    self->m_lastMouseY = y;
     self->m_isDragging = true;
-    self->m_selection.x1 = x;
-    self->m_selection.y1 = y;
-    self->m_selection.x2 = x;
-    self->m_selection.y2 = y;
+    self->m_dragMode = self->GetDragMode(x, y);
+
+    if (self->m_dragMode == 0) {
+      self->m_selection.x1 = x;
+      self->m_selection.y1 = y;
+      self->m_selection.x2 = x;
+      self->m_selection.y2 = y;
+    } else {
+      // Normalize current selection for easier drag logic
+      int l = self->m_selection.Left();
+      int t = self->m_selection.Top();
+      int r = self->m_selection.Right();
+      int b = self->m_selection.Bottom();
+      self->m_selection.x1 = l;
+      self->m_selection.y1 = t;
+      self->m_selection.x2 = r;
+      self->m_selection.y2 = b;
+    }
     return 0;
   }
   case WM_MOUSEMOVE: {
+    int x = LOWORD(lParam);
+    int y = HIWORD(lParam);
     if (self->m_isDragging) {
-      self->m_selection.x2 = LOWORD(lParam);
-      self->m_selection.y2 = HIWORD(lParam);
+      switch (self->m_dragMode) {
+      case 0: // New
+        self->m_selection.x2 = x;
+        self->m_selection.y2 = y;
+        break;
+      case 1: // TL
+        self->m_selection.x1 = x;
+        self->m_selection.y1 = y;
+        break;
+      case 2: // TR
+        self->m_selection.x2 = x;
+        self->m_selection.y1 = y;
+        break;
+      case 3: // BR
+        self->m_selection.x2 = x;
+        self->m_selection.y2 = y;
+        break;
+      case 4: // BL
+        self->m_selection.x1 = x;
+        self->m_selection.y2 = y;
+        break;
+      case 5: // T
+        self->m_selection.y1 = y;
+        break;
+      case 6: // R
+        self->m_selection.x2 = x;
+        break;
+      case 7: // B
+        self->m_selection.y2 = y;
+        break;
+      case 8: // L
+        self->m_selection.x1 = x;
+        break;
+      case 9: // Move
+      {
+        int dx = x - self->m_lastMouseX;
+        int dy = y - self->m_lastMouseY;
+        self->m_selection.x1 += dx;
+        self->m_selection.x2 += dx;
+        self->m_selection.y1 += dy;
+        self->m_selection.y2 += dy;
+        break;
+      }
+      }
+      self->m_lastMouseX = x;
+      self->m_lastMouseY = y;
+    } else {
+      // Update cursor feedback
+      int mode = self->GetDragMode(x, y);
+      LPCWSTR cursor = (LPCWSTR)IDC_CROSS;
+      switch (mode) {
+      case 1:
+      case 3:
+        cursor = (LPCWSTR)IDC_SIZENWSE;
+        break;
+      case 2:
+      case 4:
+        cursor = (LPCWSTR)IDC_SIZENESW;
+        break;
+      case 5:
+      case 7:
+        cursor = (LPCWSTR)IDC_SIZENS;
+        break;
+      case 6:
+      case 8:
+        cursor = (LPCWSTR)IDC_SIZEWE;
+        break;
+      case 9:
+        cursor = (LPCWSTR)IDC_SIZEALL;
+        break;
+      default:
+        cursor = (LPCWSTR)IDC_CROSS;
+        break;
+      }
+      SetCursor(LoadCursorW(nullptr, cursor));
     }
     return 0;
   }
   case WM_LBUTTONUP: {
     self->m_isDragging = false;
     return 0;
+  }
+  case WM_SETCURSOR: {
+    // Prevent DefWindowProc from resetting our cursor
+    if (LOWORD(lParam) == HTCLIENT) {
+      return TRUE;
+    }
+    break;
   }
   case WM_RBUTTONUP: {
     self->m_selectionConfirmed = true;
