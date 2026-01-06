@@ -49,5 +49,5 @@ Windows 11, C++ 20, CMake
 
 如果一个工作项开发完成，请勾选。
 
-[ ] 环境搭建，生成cmake脚本，添加空的 main.cpp，并链接到angle。依赖库在deps文件夹内，可先使用 dir /s/b 或等效命令查看
+[x] 环境搭建，生成cmake脚本，添加空的 main.cpp，并链接到angle。依赖库在deps文件夹内，可先使用 dir /s/b 或等效命令查看
 [ ] 提交到git，注意deps中的二进制文件均需要使用LFS。提交的默认用户名已经设置好了，提交信息请自己生成
