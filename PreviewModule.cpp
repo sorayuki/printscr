@@ -108,6 +108,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
   }
   case WM_KEYDOWN:
     if (wParam == VK_ESCAPE) {
+      self->m_selectionConfirmed = false;
       self->m_running = false;
     } else if (wParam == VK_RETURN) {
       self->m_selectionConfirmed = true;
@@ -135,7 +136,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     self->m_isDragging = false;
     return 0;
   }
-  case WM_LBUTTONDBLCLK: {
+  case WM_RBUTTONUP: {
     self->m_selectionConfirmed = true;
     self->m_running = false;
     return 0;
@@ -255,8 +256,8 @@ void main() {
     } else {
         // Compress to SDR range: clamp to sdrWhitePointRatio
         vec3 clamped = min(color.rgb, vec3(u_sdrWhitePointRatio));
-        // Reduce 30% brightness
-        o_color = vec4(clamped * 0.7, color.a);
+        // Reduce 50% brightness
+        o_color = vec4(clamped * 0.5, color.a);
     }
 }
 )";

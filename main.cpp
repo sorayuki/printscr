@@ -3,9 +3,13 @@
 #include <chrono>
 #include <iostream>
 #include <thread>
+#include <windows.h>
 #include <winrt/base.h>
 
 int main() {
+  // Declare High DPI support
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
   winrt::init_apartment();
 
   std::cout << "Printscr started." << std::endl;
