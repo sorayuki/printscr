@@ -7,9 +7,11 @@
 #include <EGL/eglext_angle.h>
 #include <GLES3/gl3.h>
 
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <vector>
+
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -146,8 +148,10 @@ private:
         int r = m_selection.Right();
         int b = m_selection.Bottom();
 
-        const int tolerance = 5;
-        const int tol = 3;
+        UINT dpi = GetDpiForWindow(m_hwnd);
+        if (dpi == 0)
+            dpi = 96;
+        const int tol = (3 * dpi) / 96;
 
         bool hitL = std::abs(x - l) <= tol;
         bool hitR = std::abs(x - r) <= tol;
@@ -443,6 +447,8 @@ uniform sampler2D u_texture;
 uniform vec4 u_selection; // x1, y1, x2, y2 in normalized coords (0 to 1, top-down)
 uniform float u_sdrWhitePointRatio; // sdrWhitePointNits / 80.0
 uniform bool u_hasSelection;
+uniform vec2 u_resolution;
+uniform float u_borderWidth;
 in vec2 v_texCoord;
 out vec4 o_color;
 
@@ -462,7 +468,25 @@ void main() {
     bool inside = v_texCoord.x >= left && v_texCoord.x <= right &&
                   v_texCoord.y >= top && v_texCoord.y <= bottom;
 
-    if (inside) {
+    // Border thickness
+    float thicknessX = u_borderWidth / u_resolution.x;
+    float thicknessY = u_borderWidth / u_resolution.y;
+
+    bool nearLeft = abs(v_texCoord.x - left) < thicknessX;
+    bool nearRight = abs(v_texCoord.x - right) < thicknessX;
+    bool nearTop = abs(v_texCoord.y - top) < thicknessY;
+    bool nearBottom = abs(v_texCoord.y - bottom) < thicknessY;
+    
+    bool inYRange = v_texCoord.y >= top - thicknessY && v_texCoord.y <= bottom + thicknessY;
+    bool inXRange = v_texCoord.x >= left - thicknessX && v_texCoord.x <= right + thicknessX;
+
+    bool onBorder = false;
+    if ((nearLeft || nearRight) && inYRange) onBorder = true;
+    if ((nearTop || nearBottom) && inXRange) onBorder = true;
+
+    if (onBorder) {
+        o_color = vec4(1.0, 0.0, 0.0, 1.0); // Red
+    } else if (inside) {
         o_color = color;
     } else {
         // Compress to SDR range: clamp to sdrWhitePointRatio
@@ -540,6 +564,19 @@ void PreviewWindowImpl::Render() {
 
     GLint locHasSelection = glGetUniformLocation(m_program, "u_hasSelection");
     glUniform1i(locHasSelection, m_selection.IsValid() ? 1 : 0);
+
+    GLint locResolution = glGetUniformLocation(m_program, "u_resolution");
+    glUniform2f(locResolution, (float)m_windowWidth, (float)m_windowHeight);
+
+    UINT dpi = GetDpiForWindow(m_hwnd);
+    if (dpi == 0)
+        dpi = 96;
+    float borderWidth = std::round((float)dpi / 96.0f);
+    if (borderWidth < 1.0f)
+        borderWidth = 1.0f;
+
+    GLint locBorderWidth = glGetUniformLocation(m_program, "u_borderWidth");
+    glUniform1f(locBorderWidth, borderWidth);
 
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     glEnableVertexAttribArray(0);
