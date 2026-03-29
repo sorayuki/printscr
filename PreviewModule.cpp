@@ -50,8 +50,8 @@ public:
         m_running = true;
         m_selectionConfirmed = false;
         m_selection = {0, 0, 0, 0};
-        m_frameCount = 0;
-        m_lastHeartbeat = std::chrono::steady_clock::now();
+        m_needsRender = true;
+        m_currentSwapInterval = -1;
 
         // Cache cursors
         m_cursorCross = LoadCursorW(nullptr, (LPCWSTR)IDC_CROSS);
@@ -63,11 +63,24 @@ public:
         m_cursorSizeAll = LoadCursorW(nullptr, (LPCWSTR)IDC_SIZEALL);
 
         LOG("Entering message loop...");
-        eglSwapInterval(m_display, 1); // Enable VSync
 
         MSG msg;
         while (m_running) {
-            // Process all pending messages
+            if (!m_needsRender) {
+                BOOL waitResult = GetMessage(&msg, nullptr, 0, 0);
+                if (waitResult <= 0) {
+                    m_running = false;
+                    break;
+                }
+
+                if (msg.message == WM_QUIT) {
+                    m_running = false;
+                } else {
+                    TranslateMessage(&msg);
+                    DispatchMessage(&msg);
+                }
+            }
+
             while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
                 if (msg.message == WM_QUIT) {
                     m_running = false;
@@ -80,12 +93,18 @@ public:
             if (!m_running)
                 break;
 
-            Render();
+            UpdateSwapInterval();
 
+            if (!m_needsRender)
+                continue;
+
+            Render();
             if (!eglSwapBuffers(m_display, m_surface)) {
                 LOG("eglSwapBuffers failed.");
                 break;
             }
+
+            m_needsRender = false;
         }
 
         LOG("Exiting message loop. Cleaning up...");
@@ -100,6 +119,7 @@ private:
     bool InitGL();
     void Render();
     void Cleanup();
+    void UpdateSwapInterval();
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -127,8 +147,8 @@ private:
 
     int m_lastMouseX = 0;
     int m_lastMouseY = 0;
-    uint32_t m_frameCount = 0;
-    std::chrono::steady_clock::time_point m_lastHeartbeat;
+    bool m_needsRender = false;
+    EGLint m_currentSwapInterval = -1;
 
     HCURSOR m_cursorCross = nullptr;
     HCURSOR m_cursorArrow = nullptr;
@@ -237,6 +257,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 self->m_selection.x2 = r;
                 self->m_selection.y2 = b;
             }
+            self->m_needsRender = true;
             return 0;
         }
         case WM_MOUSEMOVE: {
@@ -289,6 +310,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 }
                 self->m_lastMouseX = x;
                 self->m_lastMouseY = y;
+                self->m_needsRender = true;
             } else {
                 // Update cursor feedback
                 int mode = self->GetDragMode(x, y);
@@ -558,6 +580,17 @@ bool PreviewWindowImpl::InitGL() {
                  GL_HALF_FLOAT, m_frame->pixelData.data());
 
     return true;
+}
+
+void PreviewWindowImpl::UpdateSwapInterval() {
+    EGLint desiredSwapInterval = m_isDragging ? 0 : 1;
+    if (desiredSwapInterval == m_currentSwapInterval) {
+        return;
+    }
+
+    if (eglSwapInterval(m_display, desiredSwapInterval)) {
+        m_currentSwapInterval = desiredSwapInterval;
+    }
 }
 
 void PreviewWindowImpl::Render() {
