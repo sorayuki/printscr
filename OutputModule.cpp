@@ -162,9 +162,9 @@ void main() {
     }
 
     u_output.pixels[pixelIndex] = packUnorm4x8(vec4(
-        Clamp01(outputColor.b),
-        Clamp01(outputColor.g),
-        Clamp01(outputColor.r),
+        outputColor.b,
+        outputColor.g,
+        outputColor.r,
         1.0
     ));
 }
@@ -293,6 +293,13 @@ std::string GetProgramInfoLog(GLuint program) {
     return infoLog;
 }
 
+float ComputeLw(float sdrWhiteNits) {
+    if (sdrWhiteNits <= 0.0f) {
+        return 1.0f;
+    }
+    return std::max(sdrWhiteNits / kSdrReferenceWhiteNits, kMinLw);
+}
+
 GLuint CompileComputeProgram(const char *shaderSource) {
     GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(shader, 1, &shaderSource, nullptr);
@@ -372,7 +379,7 @@ public:
         const GLsizei outputWidth = static_cast<GLsizei>(selection.Width());
         const GLsizei outputHeight = static_cast<GLsizei>(selection.Height());
         const size_t outputPixels = static_cast<size_t>(outputWidth) * static_cast<size_t>(outputHeight);
-        const float lw = std::max(sdrWhiteNits / kSdrReferenceWhiteNits, kMinLw);
+        const float lw = ComputeLw(sdrWhiteNits);
         std::vector<uint8_t> bgraPixels(outputPixels * 4);
 
         const std::vector<uint8_t> uploadPixels = MakeTextureUploadData(frame);
@@ -524,7 +531,7 @@ public:
         const int outputWidth = clampedSelection.Width();
         const int outputHeight = clampedSelection.Height();
         const float sdrWhiteNits = hdrInfo.sdrWhiteLevel > 0.0f ? hdrInfo.sdrWhiteLevel : kSdrReferenceWhiteNits;
-        const float lw = sdrWhiteNits / kSdrReferenceWhiteNits;
+        const float lw = ComputeLw(sdrWhiteNits);
 
         LOG("Copying selection to clipboard via compute shader. Rect=(" + std::to_string(clampedSelection.Left()) +
             "," + std::to_string(clampedSelection.Top()) + ")-(" + std::to_string(clampedSelection.Right()) + "," +
