@@ -1,4 +1,5 @@
 #include "PreviewModule.h"
+#include "GpuFrame.h"
 #include "Logger.h"
 #include "SystemInfo.h"
 
@@ -20,9 +21,9 @@ public:
     PreviewWindowImpl() {}
     ~PreviewWindowImpl() { Cleanup(); }
 
-    SelectionRect Show(std::shared_ptr<CapturedFrame> frame) override {
+    SelectionRect Show(std::shared_ptr<GpuFrame> gpuFrame) override {
         LOG("PreviewWindow::Show called.");
-        m_frame = frame;
+        m_gpuFrame = gpuFrame;
         m_hdrInfo = SystemInfo::GetPrimaryDisplayHdrInfo();
         LOG("HDR Info: SDR White Level=" + std::to_string(m_hdrInfo.sdrWhiteLevel));
 
@@ -129,7 +130,7 @@ private:
     EGLSurface m_surface = EGL_NO_SURFACE;
     EGLContext m_context = EGL_NO_CONTEXT;
 
-    std::shared_ptr<CapturedFrame> m_frame;
+    std::shared_ptr<GpuFrame> m_gpuFrame;
     DisplayHdrInfo m_hdrInfo;
     bool m_running = false;
     bool m_selectionConfirmed = false;
@@ -420,11 +421,10 @@ bool PreviewWindowImpl::CreateWin32Window() {
 }
 
 bool PreviewWindowImpl::InitEGL() {
-    m_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    // 使用 GpuFrame 已初始化好的 EGL display，并以其 context 为 share context
+    // 创建窗口 context，使两者共享同一批纹理对象。
+    m_display = m_gpuFrame->GetDisplay();
     if (m_display == EGL_NO_DISPLAY)
-        return false;
-
-    if (!eglInitialize(m_display, nullptr, nullptr))
         return false;
 
     EGLint configAttribs[] = {EGL_RED_SIZE,
@@ -454,7 +454,7 @@ bool PreviewWindowImpl::InitEGL() {
     }
 
     EGLint contextAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-    m_context = eglCreateContext(m_display, m_config, EGL_NO_CONTEXT, contextAttribs);
+    m_context = eglCreateContext(m_display, m_config, m_gpuFrame->GetContext(), contextAttribs);
     if (m_context == EGL_NO_CONTEXT)
         return false;
 
@@ -568,16 +568,14 @@ bool PreviewWindowImpl::InitGL() {
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
     // Texture
-    glGenTextures(1, &m_texture);
+    // 直接使用 GpuFrame 已上传好的纹理，PreviewModule 的 context 与 GpuFrame 共享纹理对象
+    m_texture = m_gpuFrame->GetTextureId();
     glBindTexture(GL_TEXTURE_2D, m_texture);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    // Upload FP16 data (RGBA16F)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, m_frame->metadata.width, m_frame->metadata.height, 0, GL_RGBA,
-                 GL_HALF_FLOAT, m_frame->pixelData.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
 
     return true;
 }
@@ -643,8 +641,7 @@ void PreviewWindowImpl::Render() {
 void PreviewWindowImpl::Cleanup() {
     if (m_program)
         glDeleteProgram(m_program);
-    if (m_texture)
-        glDeleteTextures(1, &m_texture);
+    // m_texture 归 GpuFrame 所有，此处不删除
     if (m_vbo)
         glDeleteBuffers(1, &m_vbo);
 
@@ -654,7 +651,7 @@ void PreviewWindowImpl::Cleanup() {
             eglDestroySurface(m_display, m_surface);
         if (m_context != EGL_NO_CONTEXT)
             eglDestroyContext(m_display, m_context);
-        eglTerminate(m_display);
+        // eglTerminate 由 GpuFrame 负责调用
     }
 
     if (m_hwnd)

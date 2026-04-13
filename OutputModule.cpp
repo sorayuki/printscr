@@ -1,4 +1,5 @@
 #include "OutputModule.h"
+#include "GpuFrame.h"
 #include "Logger.h"
 
 #include <EGL/egl.h>
@@ -171,12 +172,12 @@ void main() {
 }
 )";
 
-SelectionRect ClampSelectionToFrame(const SelectionRect &selection, const FrameMetadata &metadata) {
+SelectionRect ClampSelectionToFrame(const SelectionRect &selection, uint32_t frameWidth, uint32_t frameHeight) {
     SelectionRect clamped = selection;
-    clamped.x1 = std::clamp(clamped.x1, 0, static_cast<int>(metadata.width));
-    clamped.x2 = std::clamp(clamped.x2, 0, static_cast<int>(metadata.width));
-    clamped.y1 = std::clamp(clamped.y1, 0, static_cast<int>(metadata.height));
-    clamped.y2 = std::clamp(clamped.y2, 0, static_cast<int>(metadata.height));
+    clamped.x1 = std::clamp(clamped.x1, 0, static_cast<int>(frameWidth));
+    clamped.x2 = std::clamp(clamped.x2, 0, static_cast<int>(frameWidth));
+    clamped.y1 = std::clamp(clamped.y1, 0, static_cast<int>(frameHeight));
+    clamped.y2 = std::clamp(clamped.y2, 0, static_cast<int>(frameHeight));
     return clamped;
 }
 
@@ -337,96 +338,50 @@ GLuint CompileComputeProgram(const char *shaderSource) {
     return program;
 }
 
-std::vector<uint8_t> MakeTextureUploadData(const CapturedFrame &frame) {
-    const size_t tightRowPitch = static_cast<size_t>(frame.metadata.width) * sizeof(uint16_t) * 4;
-    const size_t totalBytes = static_cast<size_t>(frame.metadata.rowPitch) * static_cast<size_t>(frame.metadata.height);
-    if (frame.pixelData.size() < totalBytes) {
-        throw std::runtime_error("Captured frame buffer is smaller than expected");
-    }
-
-    if (frame.metadata.rowPitch == tightRowPitch) {
-        return frame.pixelData;
-    }
-
-    std::vector<uint8_t> packed(static_cast<size_t>(frame.metadata.height) * tightRowPitch);
-    for (uint32_t row = 0; row < frame.metadata.height; ++row) {
-        const uint8_t *src = frame.pixelData.data() + static_cast<size_t>(row) * frame.metadata.rowPitch;
-        uint8_t *dst = packed.data() + static_cast<size_t>(row) * tightRowPitch;
-        std::memcpy(dst, src, tightRowPitch);
-    }
-    return packed;
-}
-
+// GpuOutputProcessor 直接使用 GpuFrame 的 EGL context，
+// 无需再创建自己的 EGL 环境，也无需重新上传纹理。
 class GpuOutputProcessor {
 public:
-    GpuOutputProcessor() { Initialize(); }
-
-    ~GpuOutputProcessor() {
-        if (m_detectProgram != 0) {
-            glDeleteProgram(m_detectProgram);
-        }
-        if (m_processProgram != 0) {
-            glDeleteProgram(m_processProgram);
-        }
-
-        if (m_display != EGL_NO_DISPLAY) {
-            eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-            if (m_surface != EGL_NO_SURFACE) {
-                eglDestroySurface(m_display, m_surface);
-            }
-            if (m_context != EGL_NO_CONTEXT) {
-                eglDestroyContext(m_display, m_context);
-            }
-            eglTerminate(m_display);
-        }
+    explicit GpuOutputProcessor(const GpuFrame &gpuFrame) : m_gpuFrame(gpuFrame) {
+        // 使用 GpuFrame 的 context 编译 compute shader
+        eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
+                       m_gpuFrame.GetSurface(), m_gpuFrame.GetContext());
+        m_detectProgram  = CompileComputeProgram(kDetectionShaderSource);
+        m_processProgram = CompileComputeProgram(kProcessingShaderSource);
+        eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     }
 
-    std::vector<uint8_t> ConvertSelection(const CapturedFrame &frame, const SelectionRect &selection, float sdrWhiteNits) {
-        struct ScopedTexture {
-            GLuint id = 0;
-            ~ScopedTexture() {
-                if (id != 0) {
-                    glDeleteTextures(1, &id);
-                }
-            }
-        };
+    ~GpuOutputProcessor() {
+        eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
+                       m_gpuFrame.GetSurface(), m_gpuFrame.GetContext());
+        if (m_detectProgram  != 0) glDeleteProgram(m_detectProgram);
+        if (m_processProgram != 0) glDeleteProgram(m_processProgram);
+        eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    }
 
+    std::vector<uint8_t> ConvertSelection(const SelectionRect &selection, float sdrWhiteNits) {
         struct ScopedBuffer {
             GLuint id = 0;
-            ~ScopedBuffer() {
-                if (id != 0) {
-                    glDeleteBuffers(1, &id);
-                }
-            }
+            ~ScopedBuffer() { if (id != 0) glDeleteBuffers(1, &id); }
         };
 
-        const GLsizei frameWidth = static_cast<GLsizei>(frame.metadata.width);
-        const GLsizei frameHeight = static_cast<GLsizei>(frame.metadata.height);
-        const GLsizei outputWidth = static_cast<GLsizei>(selection.Width());
+        const GLsizei outputWidth  = static_cast<GLsizei>(selection.Width());
         const GLsizei outputHeight = static_cast<GLsizei>(selection.Height());
-        const size_t outputPixels = static_cast<size_t>(outputWidth) * static_cast<size_t>(outputHeight);
-        const float lw = ComputeLw(sdrWhiteNits);
-        const GLuint dispatchX =
-            (static_cast<GLuint>(outputWidth) + kLocalSizeX - 1) / kLocalSizeX;
-        const GLuint dispatchY =
-            (static_cast<GLuint>(outputHeight) + kLocalSizeY - 1) / kLocalSizeY;
+        const size_t  outputPixels = static_cast<size_t>(outputWidth) * static_cast<size_t>(outputHeight);
+        const float   lw           = ComputeLw(sdrWhiteNits);
+        const GLuint  dispatchX    = (static_cast<GLuint>(outputWidth)  + kLocalSizeX - 1) / kLocalSizeX;
+        const GLuint  dispatchY    = (static_cast<GLuint>(outputHeight) + kLocalSizeY - 1) / kLocalSizeY;
+
         std::vector<uint8_t> bgraPixels(outputPixels * 4);
 
-        const std::vector<uint8_t> uploadPixels = MakeTextureUploadData(frame);
+        // 将 GpuFrame 的 context 设为 current，直接使用已上传的纹理
+        eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
+                       m_gpuFrame.GetSurface(), m_gpuFrame.GetContext());
 
-        ScopedTexture sourceTexture;
+        const GLuint sourceTexture = m_gpuFrame.GetTextureId();
+
         ScopedBuffer detectionBuffer;
         ScopedBuffer outputBuffer;
-
-        glGenTextures(1, &sourceTexture.id);
-        glBindTexture(GL_TEXTURE_2D, sourceTexture.id);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, frameWidth, frameHeight, 0, GL_RGBA, GL_HALF_FLOAT,
-                     uploadPixels.data());
 
         uint32_t detectionFlag = 0;
         glGenBuffers(1, &detectionBuffer.id);
@@ -435,7 +390,7 @@ public:
 
         glUseProgram(m_detectProgram);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, sourceTexture.id);
+        glBindTexture(GL_TEXTURE_2D, sourceTexture);
         glUniform1i(glGetUniformLocation(m_detectProgram, "u_source"), 0);
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_outputSize"), outputWidth, outputHeight);
@@ -448,6 +403,7 @@ public:
         auto *mappedDetection = static_cast<const uint32_t *>(
             glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), GL_MAP_READ_BIT));
         if (!mappedDetection) {
+            eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             throw std::runtime_error("Failed to map detection SSBO");
         }
         const bool useHlgPath = (*mappedDetection != 0u);
@@ -460,7 +416,7 @@ public:
 
         glUseProgram(m_processProgram);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, sourceTexture.id);
+        glBindTexture(GL_TEXTURE_2D, sourceTexture);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_source"), 0);
         glUniform2i(glGetUniformLocation(m_processProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_processProgram, "u_outputSize"), outputWidth, outputHeight);
@@ -476,6 +432,7 @@ public:
             glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
                              static_cast<GLsizeiptr>(outputPixels * sizeof(uint32_t)), GL_MAP_READ_BIT));
         if (!mappedPixels) {
+            eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             throw std::runtime_error("Failed to map output SSBO");
         }
         std::memcpy(bgraPixels.data(), mappedPixels, outputPixels * sizeof(uint32_t));
@@ -484,89 +441,46 @@ public:
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
 
+        eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
         LOG(useHlgPath ? "Compute shader output path selected: HLG"
                        : "Compute shader output path selected: linear-sRGB");
         return bgraPixels;
     }
 
 private:
-    void Initialize() {
-        m_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        if (m_display == EGL_NO_DISPLAY) {
-            throw std::runtime_error("eglGetDisplay failed");
-        }
-
-        if (!eglInitialize(m_display, nullptr, nullptr)) {
-            throw std::runtime_error("eglInitialize failed: " + DescribeEglError(eglGetError()));
-        }
-
-        const EGLint configAttribs[] = {
-            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
-            EGL_RED_SIZE,     8,               EGL_GREEN_SIZE,      8,
-            EGL_BLUE_SIZE,    8,               EGL_ALPHA_SIZE,      8,
-            EGL_NONE};
-        EGLint configCount = 0;
-        if (!eglChooseConfig(m_display, configAttribs, &m_config, 1, &configCount) || configCount == 0) {
-            throw std::runtime_error("eglChooseConfig failed: " + DescribeEglError(eglGetError()));
-        }
-
-        const EGLint contextAttribs[] = {EGL_CONTEXT_MAJOR_VERSION_KHR, 3, EGL_CONTEXT_MINOR_VERSION_KHR, 1,
-                                         EGL_NONE};
-        m_context = eglCreateContext(m_display, m_config, EGL_NO_CONTEXT, contextAttribs);
-        if (m_context == EGL_NO_CONTEXT) {
-            throw std::runtime_error("eglCreateContext failed: " + DescribeEglError(eglGetError()));
-        }
-
-        const EGLint surfaceAttribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
-        m_surface = eglCreatePbufferSurface(m_display, m_config, surfaceAttribs);
-        if (m_surface == EGL_NO_SURFACE) {
-            throw std::runtime_error("eglCreatePbufferSurface failed: " + DescribeEglError(eglGetError()));
-        }
-
-        if (!eglMakeCurrent(m_display, m_surface, m_surface, m_context)) {
-            throw std::runtime_error("eglMakeCurrent failed: " + DescribeEglError(eglGetError()));
-        }
-
-        m_detectProgram = CompileComputeProgram(kDetectionShaderSource);
-        m_processProgram = CompileComputeProgram(kProcessingShaderSource);
-    }
-
-    EGLDisplay m_display = EGL_NO_DISPLAY;
-    EGLConfig m_config = nullptr;
-    EGLSurface m_surface = EGL_NO_SURFACE;
-    EGLContext m_context = EGL_NO_CONTEXT;
-    GLuint m_detectProgram = 0;
+    const GpuFrame &m_gpuFrame;
+    GLuint m_detectProgram  = 0;
     GLuint m_processProgram = 0;
 };
 
 class OutputModuleImpl final : public OutputModule {
 public:
-    void CopySelectionToClipboard(const CapturedFrame &frame, const SelectionRect &selection,
+    void CopySelectionToClipboard(const GpuFrame &gpuFrame, const SelectionRect &selection,
                                   const DisplayHdrInfo &hdrInfo) override {
-        const SelectionRect clampedSelection = ClampSelectionToFrame(selection, frame.metadata);
+        const SelectionRect clampedSelection = ClampSelectionToFrame(selection, gpuFrame.Width(), gpuFrame.Height());
         if (!clampedSelection.IsValid()) {
             throw std::runtime_error("Selection is empty after clamping");
         }
 
-        const int outputWidth = clampedSelection.Width();
-        const int outputHeight = clampedSelection.Height();
-        const float sdrWhiteNits = ResolveSdrWhiteNits(hdrInfo.sdrWhiteLevel);
-        const float lw = ComputeLw(sdrWhiteNits);
+        const int   outputWidth   = clampedSelection.Width();
+        const int   outputHeight  = clampedSelection.Height();
+        const float sdrWhiteNits  = ResolveSdrWhiteNits(hdrInfo.sdrWhiteLevel);
+        const float lw            = ComputeLw(sdrWhiteNits);
 
         LOG("Copying selection to clipboard via compute shader. Rect=(" + std::to_string(clampedSelection.Left()) +
             "," + std::to_string(clampedSelection.Top()) + ")-(" + std::to_string(clampedSelection.Right()) + "," +
             std::to_string(clampedSelection.Bottom()) + "), SDR white=" + std::to_string(sdrWhiteNits) +
             ", Lw=" + std::to_string(lw));
 
-        std::vector<uint8_t> bgraPixels = m_gpuProcessor.ConvertSelection(frame, clampedSelection, sdrWhiteNits);
+        GpuOutputProcessor processor(gpuFrame);
+        const std::vector<uint8_t> bgraPixels = processor.ConvertSelection(clampedSelection, sdrWhiteNits);
         WriteBitmapToClipboard(bgraPixels, outputWidth, outputHeight);
         LOG("Selection copied to clipboard as 8-bit bitmap from SSBO output.");
     }
-
-private:
-    GpuOutputProcessor m_gpuProcessor;
 };
 
 } // namespace
 
 std::unique_ptr<OutputModule> OutputModule::Create() { return std::make_unique<OutputModuleImpl>(); }
+

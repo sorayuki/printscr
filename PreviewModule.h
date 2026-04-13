@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ScreenCapture.h"
+#include "GpuFrame.h"
 #include <memory>
 #include <windows.h>
 
@@ -20,10 +20,10 @@ class PreviewWindow {
 public:
     virtual ~PreviewWindow() = default;
 
-    // Shows the captured frame in a fullscreen window.
-    // This call blocks until the user confirms the selection or cancels.
-    // Returns the final selection rectangle.
-    virtual SelectionRect Show(std::shared_ptr<CapturedFrame> frame) = 0;
+    // 在全屏窗口中展示已上传至 GPU 的帧。
+    // 此调用阻塞直到用户确认选区或取消。
+    // 返回最终选区矩形。
+    virtual SelectionRect Show(std::shared_ptr<GpuFrame> gpuFrame) = 0;
 
     static std::unique_ptr<PreviewWindow> Create();
 };
