@@ -91,6 +91,23 @@ public:
         LOG("GpuFrame: 上传纹理 " + std::to_string(frame.metadata.width) +
             "x" + std::to_string(frame.metadata.height) + "...");
 
+        // 验证行距确实为紧凑布局（ScreenCapture 已消除填充行，此处再次确认）
+        const size_t expectedTightPitch =
+            static_cast<size_t>(frame.metadata.width) * sizeof(uint16_t) * 4; // R16G16B16A16
+        const size_t expectedTotal = expectedTightPitch * frame.metadata.height;
+        if (frame.metadata.rowPitch != expectedTightPitch) {
+            throw std::runtime_error(
+                "GpuFrame: 帧数据行距不为紧凑布局，无法直接上传 "
+                "(rowPitch=" + std::to_string(frame.metadata.rowPitch) +
+                ", expected=" + std::to_string(expectedTightPitch) + ")");
+        }
+        if (frame.pixelData.size() < expectedTotal) {
+            throw std::runtime_error(
+                "GpuFrame: 帧数据缓冲区大小不足 "
+                "(size=" + std::to_string(frame.pixelData.size()) +
+                ", expected=" + std::to_string(expectedTotal) + ")");
+        }
+
         glGenTextures(1, &m_texture);
         glBindTexture(GL_TEXTURE_2D, m_texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);

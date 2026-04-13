@@ -352,11 +352,14 @@ public:
     }
 
     ~GpuOutputProcessor() {
-        eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
-                       m_gpuFrame.GetSurface(), m_gpuFrame.GetContext());
-        if (m_detectProgram  != 0) glDeleteProgram(m_detectProgram);
-        if (m_processProgram != 0) glDeleteProgram(m_processProgram);
-        eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
+                           m_gpuFrame.GetSurface(), m_gpuFrame.GetContext())) {
+            if (m_detectProgram  != 0) glDeleteProgram(m_detectProgram);
+            if (m_processProgram != 0) glDeleteProgram(m_processProgram);
+            eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        } else {
+            LOG("GpuOutputProcessor 析构：eglMakeCurrent 失败，shader program 可能泄露");
+        }
     }
 
     std::vector<uint8_t> ConvertSelection(const SelectionRect &selection, float sdrWhiteNits) {
@@ -375,8 +378,10 @@ public:
         std::vector<uint8_t> bgraPixels(outputPixels * 4);
 
         // 将 GpuFrame 的 context 设为 current，直接使用已上传的纹理
-        eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
-                       m_gpuFrame.GetSurface(), m_gpuFrame.GetContext());
+        if (!eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
+                            m_gpuFrame.GetSurface(), m_gpuFrame.GetContext())) {
+            throw std::runtime_error("ConvertSelection: eglMakeCurrent failed");
+        }
 
         const GLuint sourceTexture = m_gpuFrame.GetTextureId();
 
