@@ -301,6 +301,13 @@ float ComputeLw(float sdrWhiteNits) {
     return std::max(sdrWhiteNits / kSdrReferenceWhiteNits, kMinLw);
 }
 
+float ResolveSdrWhiteNits(float sdrWhiteNits) {
+    if (sdrWhiteNits < (kMinLw * kSdrReferenceWhiteNits)) {
+        return kSdrReferenceWhiteNits;
+    }
+    return sdrWhiteNits;
+}
+
 GLuint CompileComputeProgram(const char *shaderSource) {
     GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
     glShaderSource(shader, 1, &shaderSource, nullptr);
@@ -399,6 +406,10 @@ public:
         const GLsizei outputHeight = static_cast<GLsizei>(selection.Height());
         const size_t outputPixels = static_cast<size_t>(outputWidth) * static_cast<size_t>(outputHeight);
         const float lw = ComputeLw(sdrWhiteNits);
+        const GLuint dispatchX =
+            (static_cast<GLuint>(outputWidth) + kLocalSizeX - 1) / kLocalSizeX;
+        const GLuint dispatchY =
+            (static_cast<GLuint>(outputHeight) + kLocalSizeY - 1) / kLocalSizeY;
         std::vector<uint8_t> bgraPixels(outputPixels * 4);
 
         const std::vector<uint8_t> uploadPixels = MakeTextureUploadData(frame);
@@ -413,7 +424,7 @@ public:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, frameWidth, frameHeight, 0, GL_RGBA, GL_HALF_FLOAT,
                      uploadPixels.data());
 
@@ -430,8 +441,7 @@ public:
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_outputSize"), outputWidth, outputHeight);
         glUniform1f(glGetUniformLocation(m_detectProgram, "u_lw"), lw);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, detectionBuffer.id);
-        glDispatchCompute((outputWidth + static_cast<GLsizei>(kLocalSizeX) - 1) / static_cast<GLsizei>(kLocalSizeX),
-                          (outputHeight + static_cast<GLsizei>(kLocalSizeY) - 1) / static_cast<GLsizei>(kLocalSizeY), 1);
+        glDispatchCompute(dispatchX, dispatchY, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, detectionBuffer.id);
@@ -458,8 +468,7 @@ public:
         glUniform1f(glGetUniformLocation(m_processProgram, "u_lw"), lw);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_useHlgPath"), useHlgPath ? 1 : 0);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, outputBuffer.id);
-        glDispatchCompute((outputWidth + static_cast<GLsizei>(kLocalSizeX) - 1) / static_cast<GLsizei>(kLocalSizeX),
-                          (outputHeight + static_cast<GLsizei>(kLocalSizeY) - 1) / static_cast<GLsizei>(kLocalSizeY), 1);
+        glDispatchCompute(dispatchX, dispatchY, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputBuffer.id);
@@ -541,7 +550,7 @@ public:
 
         const int outputWidth = clampedSelection.Width();
         const int outputHeight = clampedSelection.Height();
-        const float sdrWhiteNits = hdrInfo.sdrWhiteLevel > 0.0f ? hdrInfo.sdrWhiteLevel : kSdrReferenceWhiteNits;
+        const float sdrWhiteNits = ResolveSdrWhiteNits(hdrInfo.sdrWhiteLevel);
         const float lw = ComputeLw(sdrWhiteNits);
 
         LOG("Copying selection to clipboard via compute shader. Rect=(" + std::to_string(clampedSelection.Left()) +
