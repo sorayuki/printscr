@@ -1,3 +1,0 @@
-/home/runner/work/printscr/printscr/build_check/CMakeFiles/printscr.dir
-/home/runner/work/printscr/printscr/build_check/CMakeFiles/edit_cache.dir
-/home/runner/work/printscr/printscr/build_check/CMakeFiles/rebuild_cache.dir

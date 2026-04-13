@@ -568,13 +568,10 @@ bool PreviewWindowImpl::InitGL() {
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
     // Texture
-    // 直接使用 GpuFrame 已上传好的纹理，PreviewModule 的 context 与 GpuFrame 共享纹理对象
+    // 直接使用 GpuFrame 已上传好的纹理，PreviewModule 的 context 与 GpuFrame 共享纹理对象。
+    // 不修改共享纹理的采样参数（保留 GpuFrame 设置的 GL_NEAREST），
+    // 因预览为全屏 1:1 映射，NEAREST 与 LINEAR 效果相同。
     m_texture = m_gpuFrame->GetTextureId();
-    glBindTexture(GL_TEXTURE_2D, m_texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
 
     return true;
