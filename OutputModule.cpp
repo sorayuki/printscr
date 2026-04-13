@@ -20,6 +20,7 @@ constexpr float kBt1886Gamma = 2.4f;
 constexpr float kReferencePeakNits = 1000.0f;
 constexpr float kSdrReferenceWhiteNits = 80.0f;
 constexpr float kMinLw = 0.000001f;
+constexpr float kDefaultLw = 1.0f;
 constexpr GLuint kLocalSizeX = 16;
 constexpr GLuint kLocalSizeY = 16;
 
@@ -137,9 +138,9 @@ void main() {
     if (u_useHlgPath) {
         vec3 bt2020Linear = SrgbLinearToBt2020Linear(color);
         vec3 hlg = vec3(
-            HlgOetf(max(bt2020Linear.r, 0.0) * u_sdrWhiteNits / kReferencePeakNits),
-            HlgOetf(max(bt2020Linear.g, 0.0) * u_sdrWhiteNits / kReferencePeakNits),
-            HlgOetf(max(bt2020Linear.b, 0.0) * u_sdrWhiteNits / kReferencePeakNits)
+            HlgOetf(bt2020Linear.r * u_sdrWhiteNits / kReferencePeakNits),
+            HlgOetf(bt2020Linear.g * u_sdrWhiteNits / kReferencePeakNits),
+            HlgOetf(bt2020Linear.b * u_sdrWhiteNits / kReferencePeakNits)
         );
         vec3 interpretedLinear = vec3(
             Bt1886Eotf(hlg.r),
@@ -295,7 +296,7 @@ std::string GetProgramInfoLog(GLuint program) {
 
 float ComputeLw(float sdrWhiteNits) {
     if (sdrWhiteNits <= 0.0f) {
-        return 1.0f;
+        return kDefaultLw;
     }
     return std::max(sdrWhiteNits / kSdrReferenceWhiteNits, kMinLw);
 }
@@ -374,6 +375,24 @@ public:
     }
 
     std::vector<uint8_t> ConvertSelection(const CapturedFrame &frame, const SelectionRect &selection, float sdrWhiteNits) {
+        struct ScopedTexture {
+            GLuint id = 0;
+            ~ScopedTexture() {
+                if (id != 0) {
+                    glDeleteTextures(1, &id);
+                }
+            }
+        };
+
+        struct ScopedBuffer {
+            GLuint id = 0;
+            ~ScopedBuffer() {
+                if (id != 0) {
+                    glDeleteBuffers(1, &id);
+                }
+            }
+        };
+
         const GLsizei frameWidth = static_cast<GLsizei>(frame.metadata.width);
         const GLsizei frameHeight = static_cast<GLsizei>(frame.metadata.height);
         const GLsizei outputWidth = static_cast<GLsizei>(selection.Width());
@@ -384,75 +403,70 @@ public:
 
         const std::vector<uint8_t> uploadPixels = MakeTextureUploadData(frame);
 
-        GLuint sourceTexture = 0;
-        GLuint detectionBuffer = 0;
-        GLuint outputBuffer = 0;
+        ScopedTexture sourceTexture;
+        ScopedBuffer detectionBuffer;
+        ScopedBuffer outputBuffer;
 
-        glGenTextures(1, &sourceTexture);
-        glBindTexture(GL_TEXTURE_2D, sourceTexture);
+        glGenTextures(1, &sourceTexture.id);
+        glBindTexture(GL_TEXTURE_2D, sourceTexture.id);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 8);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, frameWidth, frameHeight, 0, GL_RGBA, GL_HALF_FLOAT,
                      uploadPixels.data());
 
         uint32_t detectionFlag = 0;
-        glGenBuffers(1, &detectionBuffer);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, detectionBuffer);
+        glGenBuffers(1, &detectionBuffer.id);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, detectionBuffer.id);
         glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(detectionFlag), &detectionFlag, GL_DYNAMIC_COPY);
 
         glUseProgram(m_detectProgram);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, sourceTexture);
+        glBindTexture(GL_TEXTURE_2D, sourceTexture.id);
         glUniform1i(glGetUniformLocation(m_detectProgram, "u_source"), 0);
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_outputSize"), outputWidth, outputHeight);
         glUniform1f(glGetUniformLocation(m_detectProgram, "u_lw"), lw);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, detectionBuffer);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, detectionBuffer.id);
         glDispatchCompute((outputWidth + static_cast<GLsizei>(kLocalSizeX) - 1) / static_cast<GLsizei>(kLocalSizeX),
                           (outputHeight + static_cast<GLsizei>(kLocalSizeY) - 1) / static_cast<GLsizei>(kLocalSizeY), 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, detectionBuffer);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, detectionBuffer.id);
         auto *mappedDetection = static_cast<const uint32_t *>(
             glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), GL_MAP_READ_BIT));
         if (!mappedDetection) {
-            glDeleteBuffers(1, &detectionBuffer);
-            glDeleteTextures(1, &sourceTexture);
             throw std::runtime_error("Failed to map detection SSBO");
         }
         const bool useHlgPath = (*mappedDetection != 0u);
         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
 
-        glGenBuffers(1, &outputBuffer);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputBuffer);
+        glGenBuffers(1, &outputBuffer.id);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputBuffer.id);
         glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(outputPixels * sizeof(uint32_t)), nullptr,
                      GL_DYNAMIC_COPY);
 
         glUseProgram(m_processProgram);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, sourceTexture);
+        glBindTexture(GL_TEXTURE_2D, sourceTexture.id);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_source"), 0);
         glUniform2i(glGetUniformLocation(m_processProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_processProgram, "u_outputSize"), outputWidth, outputHeight);
         glUniform1f(glGetUniformLocation(m_processProgram, "u_sdrWhiteNits"), sdrWhiteNits);
         glUniform1f(glGetUniformLocation(m_processProgram, "u_lw"), lw);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_useHlgPath"), useHlgPath ? 1 : 0);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, outputBuffer);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, outputBuffer.id);
         glDispatchCompute((outputWidth + static_cast<GLsizei>(kLocalSizeX) - 1) / static_cast<GLsizei>(kLocalSizeX),
                           (outputHeight + static_cast<GLsizei>(kLocalSizeY) - 1) / static_cast<GLsizei>(kLocalSizeY), 1);
-        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputBuffer);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputBuffer.id);
         auto *mappedPixels = static_cast<const uint32_t *>(
             glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
                              static_cast<GLsizeiptr>(outputPixels * sizeof(uint32_t)), GL_MAP_READ_BIT));
         if (!mappedPixels) {
-            glDeleteBuffers(1, &outputBuffer);
-            glDeleteBuffers(1, &detectionBuffer);
-            glDeleteTextures(1, &sourceTexture);
             throw std::runtime_error("Failed to map output SSBO");
         }
         std::memcpy(bgraPixels.data(), mappedPixels, outputPixels * sizeof(uint32_t));
@@ -460,9 +474,6 @@ public:
 
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
-        glDeleteBuffers(1, &outputBuffer);
-        glDeleteBuffers(1, &detectionBuffer);
-        glDeleteTextures(1, &sourceTexture);
 
         LOG(useHlgPath ? "Compute shader output path selected: HLG"
                        : "Compute shader output path selected: linear-sRGB");
