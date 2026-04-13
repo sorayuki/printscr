@@ -401,7 +401,7 @@ public:
         glUniform1i(glGetUniformLocation(m_detectProgram, "u_source"), 0);
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_outputSize"), outputWidth, outputHeight);
-        glUniform1f(glGetUniformLocation(m_detectProgram, "u_lw"), lw);
+        glUniform1f(glGetUniformLocation(m_detectProgram, "u_lw"), lw * 1.01f); // 容差
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, detectionBuffer.id);
         glDispatchCompute(dispatchX, dispatchY, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
