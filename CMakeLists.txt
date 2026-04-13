@@ -8,7 +8,7 @@ set(DEPS_DIR "${CMAKE_SOURCE_DIR}/deps")
 
 include_directories(${DEPS_DIR}/include)
 
-add_executable(printscr main.cpp ScreenCapture.cpp SystemInfo.cpp PreviewModule.cpp)
+add_executable(printscr main.cpp ScreenCapture.cpp SystemInfo.cpp PreviewModule.cpp OutputModule.cpp)
 
 # Link Libraries
 target_link_libraries(printscr PRIVATE

@@ -1,6 +1,8 @@
 #include "Logger.h"
+#include "OutputModule.h"
 #include "PreviewModule.h"
 #include "ScreenCapture.h"
+#include "SystemInfo.h"
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -54,6 +56,11 @@ int main() {
             std::cout << "Selection confirmed: (" << selection.Left() << ", " << selection.Top() << ") to ("
                       << selection.Right() << ", " << selection.Bottom() << ")" << std::endl;
             std::cout << "Size: " << selection.Width() << "x" << selection.Height() << std::endl;
+
+            const DisplayHdrInfo hdrInfo = SystemInfo::GetPrimaryDisplayHdrInfo();
+            auto outputModule = OutputModule::Create();
+            outputModule->CopySelectionToClipboard(*frame, selection, hdrInfo);
+            std::cout << "Selection copied to clipboard." << std::endl;
         } else {
             std::cout << "Selection cancelled." << std::endl;
         }
