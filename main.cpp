@@ -1,3 +1,4 @@
+#include "GpuFrame.h"
 #include "Logger.h"
 #include "OutputModule.h"
 #include "PreviewModule.h"
@@ -49,8 +50,12 @@ int main() {
         capturer->StopCapture();
         std::cout << "Capture stopped. Opening preview..." << std::endl;
 
+        // 将帧数据一次性上传至 GPU，后续 Preview 和 Output 共用此纹理
+        auto gpuFrame = GpuFrame::Create(*frame);
+        std::cout << "GPU frame created." << std::endl;
+
         auto preview = PreviewWindow::Create();
-        SelectionRect selection = preview->Show(frame);
+        SelectionRect selection = preview->Show(gpuFrame);
 
         if (selection.IsValid()) {
             std::cout << "Selection confirmed: (" << selection.Left() << ", " << selection.Top() << ") to ("
@@ -59,7 +64,7 @@ int main() {
 
             const DisplayHdrInfo hdrInfo = SystemInfo::GetPrimaryDisplayHdrInfo();
             auto outputModule = OutputModule::Create();
-            outputModule->CopySelectionToClipboard(*frame, selection, hdrInfo);
+            outputModule->CopySelectionToClipboard(*gpuFrame, selection, hdrInfo);
             std::cout << "Selection copied to clipboard." << std::endl;
         } else {
             std::cout << "Selection cancelled." << std::endl;
