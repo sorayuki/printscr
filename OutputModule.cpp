@@ -299,7 +299,7 @@ float ComputeLw(float sdrWhiteNits) {
     if (sdrWhiteNits <= 0.0f) {
         return kDefaultLw;
     }
-    return std::max(sdrWhiteNits / kSdrReferenceWhiteNits, kMinLw);
+    return (std::max)(sdrWhiteNits / kSdrReferenceWhiteNits, kMinLw);
 }
 
 float ResolveSdrWhiteNits(float sdrWhiteNits) {
