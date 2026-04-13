@@ -18,6 +18,8 @@ namespace {
 
 constexpr float kBt1886Gamma = 2.4f;
 constexpr float kReferencePeakNits = 1000.0f;
+constexpr float kSdrReferenceWhiteNits = 80.0f;
+constexpr float kMinLw = 0.000001f;
 constexpr GLuint kLocalSizeX = 16;
 constexpr GLuint kLocalSizeY = 16;
 
@@ -73,6 +75,10 @@ const float kHlgA = 0.17883277;
 const float kHlgB = 1.0 - 4.0 * kHlgA;
 const float kHlgC = 0.55991073;
 const float kReferencePeakNits = 1000.0;
+const float kSrgbLinearThreshold = 0.0031308;
+const float kSrgbLowSlope = 12.92;
+const float kSrgbHighScale = 1.055;
+const float kSrgbHighOffset = 0.055;
 
 vec3 SrgbLinearToBt2020Linear(vec3 color) {
     return vec3(
@@ -112,10 +118,10 @@ float Bt1886Oetf(float linearValue) {
 
 float LinearToSrgb(float linearValue) {
     linearValue = Clamp01(linearValue);
-    if (linearValue <= 0.0031308) {
-        return linearValue * 12.92;
+    if (linearValue <= kSrgbLinearThreshold) {
+        return linearValue * kSrgbLowSlope;
     }
-    return 1.055 * pow(linearValue, 1.0 / 2.4) - 0.055;
+    return kSrgbHighScale * pow(linearValue, 1.0 / 2.4) - kSrgbHighOffset;
 }
 
 void main() {
@@ -366,7 +372,7 @@ public:
         const GLsizei outputWidth = static_cast<GLsizei>(selection.Width());
         const GLsizei outputHeight = static_cast<GLsizei>(selection.Height());
         const size_t outputPixels = static_cast<size_t>(outputWidth) * static_cast<size_t>(outputHeight);
-        const float lw = std::max(sdrWhiteNits / 80.0f, 0.000001f);
+        const float lw = std::max(sdrWhiteNits / kSdrReferenceWhiteNits, kMinLw);
         std::vector<uint8_t> bgraPixels(outputPixels * 4);
 
         const std::vector<uint8_t> uploadPixels = MakeTextureUploadData(frame);
@@ -451,7 +457,8 @@ public:
         glDeleteBuffers(1, &detectionBuffer);
         glDeleteTextures(1, &sourceTexture);
 
-        LOG(std::string("Compute shader output path selected: ") + (useHlgPath ? "HLG" : "linear-sRGB"));
+        LOG(useHlgPath ? "Compute shader output path selected: HLG"
+                       : "Compute shader output path selected: linear-sRGB");
         return bgraPixels;
     }
 
@@ -516,8 +523,8 @@ public:
 
         const int outputWidth = clampedSelection.Width();
         const int outputHeight = clampedSelection.Height();
-        const float sdrWhiteNits = hdrInfo.sdrWhiteLevel > 0.0f ? hdrInfo.sdrWhiteLevel : 80.0f;
-        const float lw = sdrWhiteNits / 80.0f;
+        const float sdrWhiteNits = hdrInfo.sdrWhiteLevel > 0.0f ? hdrInfo.sdrWhiteLevel : kSdrReferenceWhiteNits;
+        const float lw = sdrWhiteNits / kSdrReferenceWhiteNits;
 
         LOG("Copying selection to clipboard via compute shader. Rect=(" + std::to_string(clampedSelection.Left()) +
             "," + std::to_string(clampedSelection.Top()) + ")-(" + std::to_string(clampedSelection.Right()) + "," +
