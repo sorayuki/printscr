@@ -68,7 +68,6 @@ layout(std430, binding = 0) buffer OutputBuffer {
 
 uniform ivec2 u_selectionOrigin;
 uniform ivec2 u_outputSize;
-uniform float u_sdrWhiteNits;
 uniform float u_lw;
 uniform bool u_useHlgPath;
 
@@ -77,6 +76,7 @@ const float kHlgA = 0.17883277;
 const float kHlgB = 1.0 - 4.0 * kHlgA;
 const float kHlgC = 0.55991073;
 const float kReferencePeakNits = 1000.0;
+const float kScRgbReferenceWhiteNits = 80.0;
 const float kSrgbLinearThreshold = 0.0031308;
 const float kSrgbLowSlope = 12.92;
 const float kSrgbHighScale = 1.055;
@@ -138,10 +138,12 @@ void main() {
 
     if (u_useHlgPath) {
         vec3 bt2020Linear = SrgbLinearToBt2020Linear(color);
+        // Windows advanced color scRGB capture is absolute-referred:
+        // a linear value of 1.0 corresponds to 80 nits.
         vec3 hlg = vec3(
-            HlgOetf(bt2020Linear.r * u_sdrWhiteNits / kReferencePeakNits),
-            HlgOetf(bt2020Linear.g * u_sdrWhiteNits / kReferencePeakNits),
-            HlgOetf(bt2020Linear.b * u_sdrWhiteNits / kReferencePeakNits)
+            HlgOetf(bt2020Linear.r * kScRgbReferenceWhiteNits / kReferencePeakNits),
+            HlgOetf(bt2020Linear.g * kScRgbReferenceWhiteNits / kReferencePeakNits),
+            HlgOetf(bt2020Linear.b * kScRgbReferenceWhiteNits / kReferencePeakNits)
         );
         vec3 interpretedLinear = vec3(
             Bt1886Eotf(hlg.r),
@@ -425,7 +427,6 @@ public:
         glUniform1i(glGetUniformLocation(m_processProgram, "u_source"), 0);
         glUniform2i(glGetUniformLocation(m_processProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_processProgram, "u_outputSize"), outputWidth, outputHeight);
-        glUniform1f(glGetUniformLocation(m_processProgram, "u_sdrWhiteNits"), sdrWhiteNits);
         glUniform1f(glGetUniformLocation(m_processProgram, "u_lw"), lw);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_useHlgPath"), useHlgPath ? 1 : 0);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, outputBuffer.id);
@@ -448,8 +449,12 @@ public:
 
         eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
-        LOG(useHlgPath ? "Compute shader output path selected: HLG"
-                       : "Compute shader output path selected: linear-sRGB");
+        if (useHlgPath) {
+            LOG("Compute shader output path selected: HLG. Detection still uses the current SDR white threshold, "
+                "but HLG encoding now uses the fixed scRGB absolute scale (1.0 = 80 nits).");
+        } else {
+            LOG("Compute shader output path selected: linear-sRGB");
+        }
         return bgraPixels;
     }
 
