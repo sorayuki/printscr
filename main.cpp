@@ -158,7 +158,9 @@ private:
 
 
 #include <ole2.h>
+#include <atlbase.h>
 int wmain(int argc, wchar_t *argv[]) {
+    // 守护进程模式
     if (argc > 1 && wcscmp(argv[1], L"--daemon") == 0) {
         if (g_shared_context.caller_event_name[0] != 0 || g_shared_context.caller_mutex_name[0] != 0) {
             std::cerr << "Already running as daemon." << std::endl;
@@ -176,12 +178,12 @@ int wmain(int argc, wchar_t *argv[]) {
         CoCreateGuid(&guid);
         StringFromGUID2(guid, g_shared_context.caller_event_name, 80);
         
-        HANDLE hMutex = CreateMutexW(nullptr, FALSE, g_shared_context.caller_mutex_name);
+        CHandle hMutex { CreateMutexW(nullptr, FALSE, g_shared_context.caller_mutex_name) };
         if (hMutex == nullptr) {
             std::cerr << "Failed to create mutex." << std::endl;
             return 1;
         }
-        HANDLE hEvent = CreateEventW(nullptr, TRUE, FALSE, g_shared_context.caller_event_name);
+        CHandle hEvent { CreateEventW(nullptr, TRUE, FALSE, g_shared_context.caller_event_name) };
         if (hEvent == nullptr) {
             std::cerr << "Failed to create event." << std::endl;
             return 1;
@@ -204,16 +206,17 @@ int wmain(int argc, wchar_t *argv[]) {
                 return 1;
             }
         }
+        return 0;
     }
 
-
+    // 调用守护进程执行
     if (g_shared_context.caller_event_name[0] != 0 && g_shared_context.caller_mutex_name[0] != 0) {
-        HANDLE hEvent = OpenEventW(EVENT_ALL_ACCESS, FALSE, g_shared_context.caller_event_name);
+        CHandle hEvent { OpenEventW(EVENT_ALL_ACCESS, FALSE, g_shared_context.caller_event_name) };
         if (hEvent == nullptr) {
             std::cerr << "Failed to open event." << std::endl;
             return 1;
         }
-        HANDLE hMutex = OpenMutexW(MUTEX_ALL_ACCESS, FALSE, g_shared_context.caller_mutex_name);
+        CHandle hMutex { OpenMutexW(MUTEX_ALL_ACCESS, FALSE, g_shared_context.caller_mutex_name) };
         if (hMutex == nullptr) {
             std::cerr << "Failed to open mutex." << std::endl;
             return 1;
@@ -224,6 +227,7 @@ int wmain(int argc, wchar_t *argv[]) {
         return 0;
     }
 
+    // 没有正在运行的守护进程，冷启动执行
     PrintScrApp app;
     return app.RunCaptureTarget();
 }
