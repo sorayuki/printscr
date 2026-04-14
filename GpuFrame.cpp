@@ -35,61 +35,15 @@ std::string DescribeEglError(EGLint error) {
 
 class GpuFrameImpl final : public GpuFrame {
 public:
-    GpuFrameImpl(const CapturedFrame &frame) {
-        LOG("GpuFrame: 初始化 EGL...");
-        m_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        if (m_display == EGL_NO_DISPLAY) {
-            throw std::runtime_error("GpuFrame: eglGetDisplay 失败");
-        }
-
-        if (!eglInitialize(m_display, nullptr, nullptr)) {
-            throw std::runtime_error("GpuFrame: eglInitialize 失败: " +
-                                     DescribeEglError(eglGetError()));
-        }
-
-        // 选择 PBuffer + GLES 3.1 配置（OutputModule 需要 compute shader）
-        const EGLint configAttribs[] = {
-            EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
-            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
-            EGL_RED_SIZE,        8,
-            EGL_GREEN_SIZE,      8,
-            EGL_BLUE_SIZE,       8,
-            EGL_ALPHA_SIZE,      8,
-            EGL_NONE
-        };
-        EGLint configCount = 0;
-        if (!eglChooseConfig(m_display, configAttribs, &m_config, 1, &configCount) ||
-            configCount == 0) {
-            throw std::runtime_error("GpuFrame: eglChooseConfig 失败: " +
-                                     DescribeEglError(eglGetError()));
-        }
-
-        const EGLint contextAttribs[] = {
-            EGL_CONTEXT_MAJOR_VERSION_KHR, 3,
-            EGL_CONTEXT_MINOR_VERSION_KHR, 1,
-            EGL_NONE
-        };
-        m_context = eglCreateContext(m_display, m_config, EGL_NO_CONTEXT, contextAttribs);
-        if (m_context == EGL_NO_CONTEXT) {
-            throw std::runtime_error("GpuFrame: eglCreateContext 失败: " +
-                                     DescribeEglError(eglGetError()));
-        }
-
-        const EGLint surfaceAttribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
-        m_surface = eglCreatePbufferSurface(m_display, m_config, surfaceAttribs);
-        if (m_surface == EGL_NO_SURFACE) {
-            throw std::runtime_error("GpuFrame: eglCreatePbufferSurface 失败: " +
-                                     DescribeEglError(eglGetError()));
-        }
+    GpuFrameImpl(const CapturedFrame &frame, EGLDisplay display, EGLSurface dummySurface, EGLContext context)
+        : m_display(display), m_surface(dummySurface), m_context(context) {
+        LOG("GpuFrame: 上传纹理 " + std::to_string(frame.metadata.width) +
+            "x" + std::to_string(frame.metadata.height) + "...");
 
         if (!eglMakeCurrent(m_display, m_surface, m_surface, m_context)) {
             throw std::runtime_error("GpuFrame: eglMakeCurrent 失败: " +
                                      DescribeEglError(eglGetError()));
         }
-
-        // 上传纹理（仅此一次）
-        LOG("GpuFrame: 上传纹理 " + std::to_string(frame.metadata.width) +
-            "x" + std::to_string(frame.metadata.height) + "...");
 
         // 验证行距确实为紧凑布局（ScreenCapture 已消除填充行，此处再次确认）
         const size_t expectedTightPitch =
@@ -134,21 +88,11 @@ public:
     }
 
     ~GpuFrameImpl() {
-        if (m_display != EGL_NO_DISPLAY) {
+        if (m_display != EGL_NO_DISPLAY && m_texture != 0) {
             eglMakeCurrent(m_display, m_surface, m_surface, m_context);
-            if (m_texture != 0) {
-                glDeleteTextures(1, &m_texture);
-                m_texture = 0;
-            }
+            glDeleteTextures(1, &m_texture);
+            m_texture = 0;
             eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-
-            if (m_surface != EGL_NO_SURFACE) {
-                eglDestroySurface(m_display, m_surface);
-            }
-            if (m_context != EGL_NO_CONTEXT) {
-                eglDestroyContext(m_display, m_context);
-            }
-            eglTerminate(m_display);
         }
     }
 
@@ -161,7 +105,6 @@ public:
 
 private:
     EGLDisplay  m_display = EGL_NO_DISPLAY;
-    EGLConfig   m_config  = nullptr;
     EGLSurface  m_surface = EGL_NO_SURFACE;
     EGLContext  m_context = EGL_NO_CONTEXT;
     GLuint      m_texture = 0;
@@ -171,6 +114,6 @@ private:
 
 } // namespace
 
-std::shared_ptr<GpuFrame> GpuFrame::Create(const CapturedFrame &frame) {
-    return std::make_shared<GpuFrameImpl>(frame);
+std::shared_ptr<GpuFrame> GpuFrame::Create(const CapturedFrame &frame, EGLDisplay display, EGLSurface dummySurface, EGLContext context) {
+    return std::make_shared<GpuFrameImpl>(frame, display, dummySurface, context);
 }

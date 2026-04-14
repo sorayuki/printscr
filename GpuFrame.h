@@ -23,6 +23,6 @@ public:
     virtual uint32_t Width() const = 0;
     virtual uint32_t Height() const = 0;
 
-    // 从 CPU 内存数据创建 GpuFrame：初始化 EGL、上传纹理（仅此一次）
-    static std::shared_ptr<GpuFrame> Create(const CapturedFrame &frame);
+    // 从 CPU 内存数据创建 GpuFrame：需要在已有的 EGL 环境下调用
+    static std::shared_ptr<GpuFrame> Create(const CapturedFrame &frame, EGLDisplay display, EGLSurface dummySurface, EGLContext context);
 };

@@ -340,31 +340,50 @@ GLuint CompileComputeProgram(const char *shaderSource) {
     return program;
 }
 
-// GpuOutputProcessor 直接使用 GpuFrame 的 EGL context，
-// 无需再创建自己的 EGL 环境，也无需重新上传纹理。
-class GpuOutputProcessor {
+class OutputModuleImpl final : public OutputModule {
 public:
-    explicit GpuOutputProcessor(const GpuFrame &gpuFrame) : m_gpuFrame(gpuFrame) {
-        // 使用 GpuFrame 的 context 编译 compute shader
-        eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
-                       m_gpuFrame.GetSurface(), m_gpuFrame.GetContext());
+    OutputModuleImpl(EGLDisplay display, EGLSurface dummySurface, EGLContext context)
+        : m_display(display), m_surface(dummySurface), m_context(context) {
+        if (!eglMakeCurrent(m_display, m_surface, m_surface, m_context)) {
+            throw std::runtime_error("OutputModuleImpl: eglMakeCurrent failed during init");
+        }
         m_detectProgram  = CompileComputeProgram(kDetectionShaderSource);
         m_processProgram = CompileComputeProgram(kProcessingShaderSource);
-        eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     }
 
-    ~GpuOutputProcessor() {
-        if (eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
-                           m_gpuFrame.GetSurface(), m_gpuFrame.GetContext())) {
+    ~OutputModuleImpl() {
+        if (eglMakeCurrent(m_display, m_surface, m_surface, m_context)) {
             if (m_detectProgram  != 0) glDeleteProgram(m_detectProgram);
             if (m_processProgram != 0) glDeleteProgram(m_processProgram);
-            eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         } else {
-            LOG("GpuOutputProcessor 析构：eglMakeCurrent 失败，shader program 可能泄露");
+            LOG("OutputModuleImpl: eglMakeCurrent failed during destroy, shader program might leak");
         }
     }
 
-    std::vector<uint8_t> ConvertSelection(const SelectionRect &selection, float sdrWhiteNits) {
+    void CopySelectionToClipboard(const GpuFrame &gpuFrame, const SelectionRect &selection,
+                                  const DisplayHdrInfo &hdrInfo) override {
+        const SelectionRect clampedSelection = ClampSelectionToFrame(selection, gpuFrame.Width(), gpuFrame.Height());
+        if (!clampedSelection.IsValid()) {
+            throw std::runtime_error("Selection is empty after clamping");
+        }
+
+        const int   outputWidth   = clampedSelection.Width();
+        const int   outputHeight  = clampedSelection.Height();
+        const float sdrWhiteNits  = ResolveSdrWhiteNits(hdrInfo.sdrWhiteLevel);
+
+        LOG("Copying selection to clipboard via compute shader. Rect=(" + std::to_string(clampedSelection.Left()) +
+            "," + std::to_string(clampedSelection.Top()) + ")-(" + std::to_string(clampedSelection.Right()) + "," +
+            std::to_string(clampedSelection.Bottom()) + "), SDR white=" + std::to_string(sdrWhiteNits));
+
+        std::vector<uint8_t> bgraPixels = ConvertSelection(gpuFrame, clampedSelection, sdrWhiteNits);
+        WriteBitmapToClipboard(bgraPixels, outputWidth, outputHeight);
+        LOG("Selection copied to clipboard as 8-bit bitmap from SSBO output.");
+    }
+
+private:
+    std::vector<uint8_t> ConvertSelection(const GpuFrame &gpuFrame, const SelectionRect &selection, float sdrWhiteNits) {
         struct ScopedBuffer {
             GLuint id = 0;
             ~ScopedBuffer() { if (id != 0) glDeleteBuffers(1, &id); }
@@ -379,13 +398,11 @@ public:
 
         std::vector<uint8_t> bgraPixels(outputPixels * 4);
 
-        // 将 GpuFrame 的 context 设为 current，直接使用已上传的纹理
-        if (!eglMakeCurrent(m_gpuFrame.GetDisplay(), m_gpuFrame.GetSurface(),
-                            m_gpuFrame.GetSurface(), m_gpuFrame.GetContext())) {
+        if (!eglMakeCurrent(m_display, m_surface, m_surface, m_context)) {
             throw std::runtime_error("ConvertSelection: eglMakeCurrent failed");
         }
 
-        const GLuint sourceTexture = m_gpuFrame.GetTextureId();
+        const GLuint sourceTexture = gpuFrame.GetTextureId();
 
         ScopedBuffer detectionBuffer;
         ScopedBuffer outputBuffer;
@@ -410,7 +427,7 @@ public:
         auto *mappedDetection = static_cast<const uint32_t *>(
             glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), GL_MAP_READ_BIT));
         if (!mappedDetection) {
-            eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             throw std::runtime_error("Failed to map detection SSBO");
         }
         const bool useHlgPath = (*mappedDetection != 0u);
@@ -438,7 +455,7 @@ public:
             glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
                              static_cast<GLsizeiptr>(outputPixels * sizeof(uint32_t)), GL_MAP_READ_BIT));
         if (!mappedPixels) {
-            eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             throw std::runtime_error("Failed to map output SSBO");
         }
         std::memcpy(bgraPixels.data(), mappedPixels, outputPixels * sizeof(uint32_t));
@@ -447,7 +464,7 @@ public:
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        eglMakeCurrent(m_gpuFrame.GetDisplay(), EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
         if (useHlgPath) {
             LOG("Compute shader output path selected: HLG. Detection still uses the current SDR white threshold, "
@@ -458,39 +475,14 @@ public:
         return bgraPixels;
     }
 
-private:
-    const GpuFrame &m_gpuFrame;
+    EGLDisplay m_display = EGL_NO_DISPLAY;
+    EGLSurface m_surface = EGL_NO_SURFACE;
+    EGLContext m_context = EGL_NO_CONTEXT;
     GLuint m_detectProgram  = 0;
     GLuint m_processProgram = 0;
 };
 
-class OutputModuleImpl final : public OutputModule {
-public:
-    void CopySelectionToClipboard(const GpuFrame &gpuFrame, const SelectionRect &selection,
-                                  const DisplayHdrInfo &hdrInfo) override {
-        const SelectionRect clampedSelection = ClampSelectionToFrame(selection, gpuFrame.Width(), gpuFrame.Height());
-        if (!clampedSelection.IsValid()) {
-            throw std::runtime_error("Selection is empty after clamping");
-        }
-
-        const int   outputWidth   = clampedSelection.Width();
-        const int   outputHeight  = clampedSelection.Height();
-        const float sdrWhiteNits  = ResolveSdrWhiteNits(hdrInfo.sdrWhiteLevel);
-        const float lw            = ComputeLw(sdrWhiteNits);
-
-        LOG("Copying selection to clipboard via compute shader. Rect=(" + std::to_string(clampedSelection.Left()) +
-            "," + std::to_string(clampedSelection.Top()) + ")-(" + std::to_string(clampedSelection.Right()) + "," +
-            std::to_string(clampedSelection.Bottom()) + "), SDR white=" + std::to_string(sdrWhiteNits) +
-            ", Lw=" + std::to_string(lw));
-
-        GpuOutputProcessor processor(gpuFrame);
-        const std::vector<uint8_t> bgraPixels = processor.ConvertSelection(clampedSelection, sdrWhiteNits);
-        WriteBitmapToClipboard(bgraPixels, outputWidth, outputHeight);
-        LOG("Selection copied to clipboard as 8-bit bitmap from SSBO output.");
-    }
-};
-
 } // namespace
 
-std::unique_ptr<OutputModule> OutputModule::Create() { return std::make_unique<OutputModuleImpl>(); }
+std::unique_ptr<OutputModule> OutputModule::Create(EGLDisplay display, EGLSurface dummySurface, EGLContext context) { return std::make_unique<OutputModuleImpl>(display, dummySurface, context); }
 

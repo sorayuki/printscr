@@ -18,8 +18,10 @@
 
 class PreviewWindowImpl : public PreviewWindow {
 public:
-    PreviewWindowImpl() {}
-    ~PreviewWindowImpl() { Cleanup(); }
+    PreviewWindowImpl(EGLDisplay display, EGLSurface dummySurface, EGLContext rootContext)
+        : m_display(display), m_dummySurface(dummySurface), m_rootContext(rootContext) {}
+
+    ~PreviewWindowImpl() { CleanupGL(); }
 
     SelectionRect Show(std::shared_ptr<GpuFrame> gpuFrame) override {
         LOG("PreviewWindow::Show called.");
@@ -34,19 +36,28 @@ public:
         }
         LOG("Window created.");
 
-        LOG("Initializing EGL...");
-        if (!InitEGL()) {
-            LOG("Failed to initialize EGL.");
+        LOG("Initializing EGL Surface...");
+        if (!InitEGLSurface()) {
+            LOG("Failed to initialize EGL surface.");
+            DestroyWindow(m_hwnd);
+            m_hwnd = nullptr;
             return {};
         }
-        LOG("EGL initialized.");
 
-        LOG("Initializing GL...");
-        if (!InitGL()) {
-            LOG("Failed to initialize GL.");
-            return {};
+        if (m_program == 0) {
+            LOG("Initializing GL (first time)...");
+            if (!InitGL()) {
+                LOG("Failed to initialize GL.");
+                CleanupSurface();
+                DestroyWindow(m_hwnd);
+                m_hwnd = nullptr;
+                return {};
+            }
+            LOG("GL initialized.");
+        } else {
+            // Re-bind texture properly inside InitGL/Render if needed, we just update m_texture here
+            m_texture = m_gpuFrame->GetTextureId();
         }
-        LOG("GL initialized.");
 
         m_running = true;
         m_selectionConfirmed = false;
@@ -75,6 +86,11 @@ public:
                 }
 
                 if (msg.message == WM_QUIT) {
+                    // Because we might have a lingering WM_QUIT from another part, we just consume it.
+                    // If it was meant for us, m_running will become false eventually anyway.
+                    // Wait, if it's meant for the app, we should probably repost it. Actually,
+                    // we remove WM_QUIT posting from WM_DESTROY, so WM_QUIT should never happen
+                    // unless the app is terminating.
                     m_running = false;
                 } else {
                     TranslateMessage(&msg);
@@ -108,24 +124,40 @@ public:
             m_needsRender = false;
         }
 
-        LOG("Exiting message loop. Cleaning up...");
-        Cleanup();
-        LOG("Cleanup done. Show returning.");
+        LOG("Exiting message loop. Cleaning up surface...");
+        CleanupSurface();
+        if (m_hwnd) {
+            DestroyWindow(m_hwnd);
+            m_hwnd = nullptr;
+        }
+
+        // We MUST pump the queue for WM_DESTROY and WM_NCDESTROY otherwise DestroyWindow won't finish its message sending
+        // Actually DestroyWindow is synchronous for messages, but we should handle pending ones if any.
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        LOG("Surface cleanup done. Show returning.");
         return m_selectionConfirmed ? m_selection : SelectionRect{0, 0, 0, 0};
     }
 
 private:
     bool CreateWin32Window();
-    bool InitEGL();
+    bool InitEGLSurface();
     bool InitGL();
     void Render();
-    void Cleanup();
+    void CleanupSurface();
+    void CleanupGL();
     void UpdateSwapInterval();
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
     HWND m_hwnd = nullptr;
     EGLDisplay m_display = EGL_NO_DISPLAY;
+    EGLSurface m_dummySurface = EGL_NO_SURFACE;
+    EGLContext m_rootContext = EGL_NO_CONTEXT;
+    
     EGLConfig m_config = nullptr;
     EGLSurface m_surface = EGL_NO_SURFACE;
     EGLContext m_context = EGL_NO_CONTEXT;
@@ -201,8 +233,8 @@ private:
     }
 };
 
-std::unique_ptr<PreviewWindow> PreviewWindow::Create() {
-    return std::make_unique<PreviewWindowImpl>();
+std::unique_ptr<PreviewWindow> PreviewWindow::Create(EGLDisplay display, EGLSurface dummySurface, EGLContext context) {
+    return std::make_unique<PreviewWindowImpl>(display, dummySurface, context);
 }
 
 LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -224,7 +256,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             self->m_running = false;
             return 0;
         case WM_KEYDOWN:
-            LOG("WM_KEYDOWN: " + std::to_string(wParam));
+            // LOG("WM_KEYDOWN: " + std::to_string(wParam));
             if (wParam == VK_ESCAPE) {
                 self->m_selectionConfirmed = false;
                 self->m_running = false;
@@ -389,13 +421,8 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             return 1;
         case WM_DESTROY:
             LOG("WM_DESTROY received.");
-            // Do NOT clear GWLP_USERDATA here.
-            // If we clear it, any subsequent messages (like WM_NCDESTROY) processing in
-            // this same window cycle or pending in the queue will retrieve a NULL
-            // 'self' pointer and crash or fail. SetWindowLongPtr(hwnd, GWLP_USERDATA,
-            // 0);
+            // Do NOT PostQuitMessage(0); here! That will poison the next Show()
             self->m_running = false;
-            PostQuitMessage(0);
             return 0;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -403,60 +430,59 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
 
 bool PreviewWindowImpl::CreateWin32Window() {
     WNDCLASSEXW wc = {sizeof(WNDCLASSEXW)};
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = GetModuleHandle(nullptr);
-    wc.lpszClassName = L"PrintscrPreview";
-    wc.hCursor = LoadCursor(nullptr, IDC_CROSS);
-    wc.style = CS_DBLCLKS;
-
-    RegisterClassExW(&wc);
+    if (!GetClassInfoExW(GetModuleHandle(nullptr), L"PrintscrPreview", &wc)) {
+        wc.lpfnWndProc = WndProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.lpszClassName = L"PrintscrPreview";
+        wc.hCursor = LoadCursor(nullptr, IDC_CROSS);
+        wc.style = CS_DBLCLKS;
+        RegisterClassExW(&wc);
+    }
 
     m_windowWidth = GetSystemMetrics(SM_CXSCREEN);
     m_windowHeight = GetSystemMetrics(SM_CYSCREEN);
 
     m_hwnd = CreateWindowExW(WS_EX_TOPMOST, L"PrintscrPreview", L"Preview", WS_POPUP | WS_VISIBLE, 0, 0, m_windowWidth,
-                             m_windowHeight, nullptr, nullptr, wc.hInstance, this);
+                             m_windowHeight, nullptr, nullptr, GetModuleHandle(nullptr), this);
 
     return m_hwnd != nullptr;
 }
 
-bool PreviewWindowImpl::InitEGL() {
-    // 使用 GpuFrame 已初始化好的 EGL display，并以其 context 为 share context
-    // 创建窗口 context，使两者共享同一批纹理对象。
-    m_display = m_gpuFrame->GetDisplay();
+bool PreviewWindowImpl::InitEGLSurface() {
     if (m_display == EGL_NO_DISPLAY)
         return false;
 
-    EGLint configAttribs[] = {EGL_RED_SIZE,
-                              16,
-                              EGL_GREEN_SIZE,
-                              16,
-                              EGL_BLUE_SIZE,
-                              16,
-                              EGL_ALPHA_SIZE,
-                              16,
-                              EGL_DEPTH_SIZE,
-                              24,
-                              EGL_STENCIL_SIZE,
-                              8,
-                              EGL_RENDERABLE_TYPE,
-                              EGL_OPENGL_ES3_BIT,
-                              EGL_SURFACE_TYPE,
-                              EGL_WINDOW_BIT,
-                              EGL_COLOR_COMPONENT_TYPE_EXT,
-                              EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
-                              EGL_NONE};
+    if (m_context == EGL_NO_CONTEXT) {
+        EGLint configAttribs[] = {EGL_RED_SIZE,
+                                  16,
+                                  EGL_GREEN_SIZE,
+                                  16,
+                                  EGL_BLUE_SIZE,
+                                  16,
+                                  EGL_ALPHA_SIZE,
+                                  16,
+                                  EGL_DEPTH_SIZE,
+                                  24,
+                                  EGL_STENCIL_SIZE,
+                                  8,
+                                  EGL_RENDERABLE_TYPE,
+                                  EGL_OPENGL_ES3_BIT,
+                                  EGL_SURFACE_TYPE,
+                                  EGL_WINDOW_BIT,
+                                  EGL_COLOR_COMPONENT_TYPE_EXT,
+                                  EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
+                                  EGL_NONE};
 
-    EGLint numConfigs;
-    if (!eglChooseConfig(m_display, configAttribs, &m_config, 1, &numConfigs) || numConfigs == 0) {
-        // Fallback if float config fails (though it shouldn't for HDR)
-        return false;
+        EGLint numConfigs;
+        if (!eglChooseConfig(m_display, configAttribs, &m_config, 1, &numConfigs) || numConfigs == 0) {
+            return false;
+        }
+
+        EGLint contextAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+        m_context = eglCreateContext(m_display, m_config, m_rootContext, contextAttribs);
+        if (m_context == EGL_NO_CONTEXT)
+            return false;
     }
-
-    EGLint contextAttribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
-    m_context = eglCreateContext(m_display, m_config, m_gpuFrame->GetContext(), contextAttribs);
-    if (m_context == EGL_NO_CONTEXT)
-        return false;
 
     EGLint surfaceAttribs[] = {EGL_DIRECT_COMPOSITION_ANGLE, TRUE, EGL_NONE};
     m_surface = eglCreateWindowSurface(m_display, m_config, m_hwnd, surfaceAttribs);
@@ -568,11 +594,7 @@ bool PreviewWindowImpl::InitGL() {
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
     // Texture
-    // 直接使用 GpuFrame 已上传好的纹理，PreviewModule 的 context 与 GpuFrame 共享纹理对象。
-    // 不修改共享纹理的采样参数（保留 GpuFrame 设置的 GL_NEAREST），
-    // 因预览为全屏 1:1 映射，NEAREST 与 LINEAR 效果相同。
     m_texture = m_gpuFrame->GetTextureId();
-    glBindTexture(GL_TEXTURE_2D, 0);
 
     return true;
 }
@@ -635,27 +657,28 @@ void PreviewWindowImpl::Render() {
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
-void PreviewWindowImpl::Cleanup() {
-    if (m_program)
-        glDeleteProgram(m_program);
-    // m_texture 归 GpuFrame 所有，此处不删除
-    if (m_vbo)
-        glDeleteBuffers(1, &m_vbo);
-
+void PreviewWindowImpl::CleanupSurface() {
     if (m_display != EGL_NO_DISPLAY) {
         eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        if (m_surface != EGL_NO_SURFACE)
+        if (m_surface != EGL_NO_SURFACE) {
             eglDestroySurface(m_display, m_surface);
-        if (m_context != EGL_NO_CONTEXT)
-            eglDestroyContext(m_display, m_context);
-        // eglTerminate 由 GpuFrame 负责调用
+            m_surface = EGL_NO_SURFACE;
+        }
     }
-
-    if (m_hwnd)
-        DestroyWindow(m_hwnd);
-
-    m_hwnd = nullptr;
-    m_display = EGL_NO_DISPLAY;
-    m_surface = EGL_NO_SURFACE;
-    m_context = EGL_NO_CONTEXT;
 }
+
+void PreviewWindowImpl::CleanupGL() {
+    // Requires context to be current to delete resources
+    if (m_display != EGL_NO_DISPLAY && m_context != EGL_NO_CONTEXT) {
+        // Use dummy surface to make current and delete GL objects
+        if (m_dummySurface != EGL_NO_SURFACE) {
+            eglMakeCurrent(m_display, m_dummySurface, m_dummySurface, m_context);
+            if (m_program) glDeleteProgram(m_program);
+            if (m_vbo) glDeleteBuffers(1, &m_vbo);
+        }
+        eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(m_display, m_context);
+        m_context = EGL_NO_CONTEXT;
+    }
+}
+

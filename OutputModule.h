@@ -12,5 +12,5 @@ public:
     virtual void CopySelectionToClipboard(const GpuFrame &gpuFrame, const SelectionRect &selection,
                                           const DisplayHdrInfo &hdrInfo) = 0;
 
-    static std::unique_ptr<OutputModule> Create();
+    static std::unique_ptr<OutputModule> Create(EGLDisplay display, EGLSurface dummySurface, EGLContext context);
 };

@@ -25,5 +25,5 @@ public:
     // 返回最终选区矩形。
     virtual SelectionRect Show(std::shared_ptr<GpuFrame> gpuFrame) = 0;
 
-    static std::unique_ptr<PreviewWindow> Create();
+    static std::unique_ptr<PreviewWindow> Create(EGLDisplay display, EGLSurface dummySurface, EGLContext context);
 };
