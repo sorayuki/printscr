@@ -77,6 +77,8 @@ const float kHlgB = 1.0 - 4.0 * kHlgA;
 const float kHlgC = 0.55991073;
 const float kReferencePeakNits = 1000.0;
 const float kScRgbReferenceWhiteNits = 80.0;
+const float kMinWhiteLinear = 0.000001;
+const float kTargetWhiteSignal = 0.9345;
 const float kSrgbLinearThreshold = 0.0031308;
 const float kSrgbLowSlope = 12.92;
 const float kSrgbHighScale = 1.055;
@@ -118,6 +120,25 @@ float Bt1886Oetf(float linearValue) {
     return pow(Clamp01(linearValue), 1.0 / kBt1886Gamma);
 }
 
+float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear) {
+    whiteLinear = max(whiteLinear, kMinWhiteLinear);
+    linearValue = max(linearValue, 0.0);
+
+    float normalized = linearValue / whiteLinear;
+    float targetWhiteLinear = Bt1886Eotf(kTargetWhiteSignal);
+    if (normalized <= 1.0) {
+        return normalized * targetWhiteLinear;
+    }
+
+    // After the HLG/BT.1886 interpretation path, reference HDR peak maps to
+    // roughly linear 1.0. Roll values above SDR white into the remaining SDR
+    // headroom instead of clipping them directly to pure white.
+    float peakNormalized = max(1.0 / whiteLinear, 1.000001);
+    float t = clamp((normalized - 1.0) / (peakNormalized - 1.0), 0.0, 1.0);
+    float shoulder = 1.0 - pow(1.0 - t, 2.0);
+    return mix(targetWhiteLinear, 1.0, shoulder);
+}
+
 float LinearToSrgb(float linearValue) {
     linearValue = Clamp01(linearValue);
     if (linearValue <= kSrgbLinearThreshold) {
@@ -140,17 +161,28 @@ void main() {
         vec3 bt2020Linear = SrgbLinearToBt2020Linear(color);
         // Windows advanced color scRGB capture is absolute-referred:
         // a linear value of 1.0 corresponds to 80 nits.
+        // The HLG/BT.1886 conversion compresses highlights, but the clipboard
+        // result is SDR. Therefore the current Windows SDR white level must be
+        // re-normalized back to 1.0, otherwise ordinary system white becomes a
+        // middle gray whenever the selection contains HDR highlights.
         vec3 hlg = vec3(
             HlgOetf(bt2020Linear.r * kScRgbReferenceWhiteNits / kReferencePeakNits),
             HlgOetf(bt2020Linear.g * kScRgbReferenceWhiteNits / kReferencePeakNits),
             HlgOetf(bt2020Linear.b * kScRgbReferenceWhiteNits / kReferencePeakNits)
         );
+        float sdrWhiteHlg = HlgOetf(u_lw * kScRgbReferenceWhiteNits / kReferencePeakNits);
+        float sdrWhiteLinear = max(Bt1886Eotf(sdrWhiteHlg), kMinWhiteLinear);
         vec3 interpretedLinear = vec3(
             Bt1886Eotf(hlg.r),
             Bt1886Eotf(hlg.g),
             Bt1886Eotf(hlg.b)
         );
-        vec3 bt709Linear = Bt2020LinearToBt709Linear(interpretedLinear);
+        vec3 bt709LinearRaw = Bt2020LinearToBt709Linear(interpretedLinear);
+        vec3 bt709Linear = vec3(
+            ToneMapHdrToSdrLinear(bt709LinearRaw.r, sdrWhiteLinear),
+            ToneMapHdrToSdrLinear(bt709LinearRaw.g, sdrWhiteLinear),
+            ToneMapHdrToSdrLinear(bt709LinearRaw.b, sdrWhiteLinear)
+        );
         outputColor = vec3(
             Bt1886Oetf(bt709Linear.r),
             Bt1886Oetf(bt709Linear.g),
@@ -468,7 +500,8 @@ private:
 
         if (useHlgPath) {
             LOG("Compute shader output path selected: HLG. Detection still uses the current SDR white threshold, "
-                "but HLG encoding now uses the fixed scRGB absolute scale (1.0 = 80 nits).");
+                "HLG encoding uses the fixed scRGB absolute scale (1.0 = 80 nits), SDR white maps to 0.85, "
+                "and HDR highlights are compressed into the remaining headroom.");
         } else {
             LOG("Compute shader output path selected: linear-sRGB");
         }
