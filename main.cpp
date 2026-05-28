@@ -118,7 +118,17 @@ public:
             m_capturer->StopCapture();
             std::cout << "Capture stopped. Opening preview..." << std::endl;
 
-            auto gpuFrame = GpuFrame::Create(*frame, m_eglDisplay, m_dummySurface, m_rootContext);
+            const bool useEarlySdrMode = (GetKeyState(VK_CAPITAL) & 0x0001) != 0;
+            const DisplayHdrInfo hdrInfo = SystemInfo::GetPrimaryDisplayHdrInfo();
+            LOG(std::string("CapsLock early SDR mode: ") + (useEarlySdrMode ? "enabled" : "disabled"));
+
+            std::shared_ptr<GpuFrame> gpuFrame;
+            if (useEarlySdrMode) {
+                gpuFrame = GpuFrame::CreateSdr8FromHdr(*frame, hdrInfo.sdrWhiteLevel, m_eglDisplay, m_dummySurface,
+                                                       m_rootContext);
+            } else {
+                gpuFrame = GpuFrame::Create(*frame, m_eglDisplay, m_dummySurface, m_rootContext);
+            }
             std::cout << "GPU frame created." << std::endl;
 
             SelectionRect selection = m_previewWindow->Show(gpuFrame);
@@ -128,7 +138,6 @@ public:
                           << selection.Right() << ", " << selection.Bottom() << ")" << std::endl;
                 std::cout << "Size: " << selection.Width() << "x" << selection.Height() << std::endl;
 
-                const DisplayHdrInfo hdrInfo = SystemInfo::GetPrimaryDisplayHdrInfo();
                 m_outputModule->CopySelectionToClipboard(*gpuFrame, selection, hdrInfo);
                 std::cout << "Selection copied to clipboard." << std::endl;
             } else {

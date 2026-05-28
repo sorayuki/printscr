@@ -26,8 +26,10 @@ public:
     SelectionRect Show(std::shared_ptr<GpuFrame> gpuFrame) override {
         LOG("PreviewWindow::Show called.");
         m_gpuFrame = gpuFrame;
+        m_useSdrSurface = (m_gpuFrame->GetFormat() == GpuFrameFormat::Sdr8);
         m_hdrInfo = SystemInfo::GetPrimaryDisplayHdrInfo();
-        LOG("HDR Info: SDR White Level=" + std::to_string(m_hdrInfo.sdrWhiteLevel));
+        LOG("HDR Info: SDR White Level=" + std::to_string(m_hdrInfo.sdrWhiteLevel) +
+            ", Preview surface mode=" + std::string(m_useSdrSurface ? "SDR 8bit" : "HDR float"));
 
         LOG("Creating Win32 window...");
         if (!CreateWin32Window()) {
@@ -182,6 +184,8 @@ private:
     int m_lastMouseY = 0;
     bool m_needsRender = false;
     EGLint m_currentSwapInterval = -1;
+    bool m_useSdrSurface = false;
+    bool m_contextUsesSdrSurface = false;
 
     HCURSOR m_cursorCross = nullptr;
     HCURSOR m_cursorArrow = nullptr;
@@ -452,26 +456,48 @@ bool PreviewWindowImpl::InitEGLSurface() {
     if (m_display == EGL_NO_DISPLAY)
         return false;
 
+    if (m_context != EGL_NO_CONTEXT && m_contextUsesSdrSurface != m_useSdrSurface) {
+        CleanupGL();
+    }
+
     if (m_context == EGL_NO_CONTEXT) {
-        EGLint configAttribs[] = {EGL_RED_SIZE,
-                                  16,
-                                  EGL_GREEN_SIZE,
-                                  16,
-                                  EGL_BLUE_SIZE,
-                                  16,
-                                  EGL_ALPHA_SIZE,
-                                  16,
-                                  EGL_DEPTH_SIZE,
-                                  24,
-                                  EGL_STENCIL_SIZE,
-                                  8,
-                                  EGL_RENDERABLE_TYPE,
-                                  EGL_OPENGL_ES3_BIT,
-                                  EGL_SURFACE_TYPE,
-                                  EGL_WINDOW_BIT,
-                                  EGL_COLOR_COMPONENT_TYPE_EXT,
-                                  EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
-                                  EGL_NONE};
+        EGLint hdrConfigAttribs[] = {EGL_RED_SIZE,
+                                     16,
+                                     EGL_GREEN_SIZE,
+                                     16,
+                                     EGL_BLUE_SIZE,
+                                     16,
+                                     EGL_ALPHA_SIZE,
+                                     16,
+                                     EGL_DEPTH_SIZE,
+                                     24,
+                                     EGL_STENCIL_SIZE,
+                                     8,
+                                     EGL_RENDERABLE_TYPE,
+                                     EGL_OPENGL_ES3_BIT,
+                                     EGL_SURFACE_TYPE,
+                                     EGL_WINDOW_BIT,
+                                     EGL_COLOR_COMPONENT_TYPE_EXT,
+                                     EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
+                                     EGL_NONE};
+        EGLint sdrConfigAttribs[] = {EGL_RED_SIZE,
+                                     8,
+                                     EGL_GREEN_SIZE,
+                                     8,
+                                     EGL_BLUE_SIZE,
+                                     8,
+                                     EGL_ALPHA_SIZE,
+                                     8,
+                                     EGL_DEPTH_SIZE,
+                                     24,
+                                     EGL_STENCIL_SIZE,
+                                     8,
+                                     EGL_RENDERABLE_TYPE,
+                                     EGL_OPENGL_ES3_BIT,
+                                     EGL_SURFACE_TYPE,
+                                     EGL_WINDOW_BIT,
+                                     EGL_NONE};
+        EGLint *configAttribs = m_useSdrSurface ? sdrConfigAttribs : hdrConfigAttribs;
 
         EGLint numConfigs;
         if (!eglChooseConfig(m_display, configAttribs, &m_config, 1, &numConfigs) || numConfigs == 0) {
@@ -482,6 +508,7 @@ bool PreviewWindowImpl::InitEGLSurface() {
         m_context = eglCreateContext(m_display, m_config, m_rootContext, contextAttribs);
         if (m_context == EGL_NO_CONTEXT)
             return false;
+        m_contextUsesSdrSurface = m_useSdrSurface;
     }
 
     EGLint surfaceAttribs[] = {EGL_DIRECT_COMPOSITION_ANGLE, TRUE, EGL_NONE};
@@ -675,6 +702,9 @@ void PreviewWindowImpl::CleanupGL() {
             eglMakeCurrent(m_display, m_dummySurface, m_dummySurface, m_context);
             if (m_program) glDeleteProgram(m_program);
             if (m_vbo) glDeleteBuffers(1, &m_vbo);
+            m_program = 0;
+            m_vbo = 0;
+            m_texture = 0;
         }
         eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroyContext(m_display, m_context);

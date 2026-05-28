@@ -70,6 +70,7 @@ uniform ivec2 u_selectionOrigin;
 uniform ivec2 u_outputSize;
 uniform float u_lw;
 uniform bool u_useHlgPath;
+uniform bool u_passthroughSdr;
 
 const float kBt1886Gamma = 2.4;
 const float kHlgA = 0.17883277;
@@ -157,7 +158,9 @@ void main() {
     vec3 color = max(texelFetch(u_source, u_selectionOrigin + gid, 0).rgb, vec3(0.0));
     vec3 outputColor;
 
-    if (u_useHlgPath) {
+    if (u_passthroughSdr) {
+        outputColor = clamp(color, vec3(0.0), vec3(1.0));
+    } else if (u_useHlgPath) {
         vec3 bt2020Linear = SrgbLinearToBt2020Linear(color);
         // Windows advanced color scRGB capture is absolute-referred:
         // a linear value of 1.0 corresponds to 80 nits.
@@ -462,7 +465,8 @@ private:
             eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             throw std::runtime_error("Failed to map detection SSBO");
         }
-        const bool useHlgPath = (*mappedDetection != 0u);
+        const bool usePassThroughSdr = (gpuFrame.GetFormat() == GpuFrameFormat::Sdr8);
+        const bool useHlgPath = !usePassThroughSdr && (*mappedDetection != 0u);
         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
 
         glGenBuffers(1, &outputBuffer.id);
@@ -478,6 +482,7 @@ private:
         glUniform2i(glGetUniformLocation(m_processProgram, "u_outputSize"), outputWidth, outputHeight);
         glUniform1f(glGetUniformLocation(m_processProgram, "u_lw"), lw);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_useHlgPath"), useHlgPath ? 1 : 0);
+        glUniform1i(glGetUniformLocation(m_processProgram, "u_passthroughSdr"), usePassThroughSdr ? 1 : 0);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, outputBuffer.id);
         glDispatchCompute(dispatchX, dispatchY, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
@@ -498,7 +503,9 @@ private:
 
         eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
-        if (useHlgPath) {
+        if (usePassThroughSdr) {
+            LOG("Compute shader output path selected: SDR 8bit passthrough");
+        } else if (useHlgPath) {
             LOG("Compute shader output path selected: HLG. Detection still uses the current SDR white threshold, "
                 "HLG encoding uses the fixed scRGB absolute scale (1.0 = 80 nits), SDR white maps to 0.85, "
                 "and HDR highlights are compressed into the remaining headroom.");

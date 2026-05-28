@@ -6,6 +6,11 @@
 #include <GLES3/gl31.h>
 #include <memory>
 
+enum class GpuFrameFormat {
+    ScRgbFloat16,
+    Sdr8
+};
+
 // GPU 上常驻的帧纹理，持有 EGL display/context/surface 以及上传好的纹理对象。
 // 所有需要访问这块纹理的模块（Preview、Output）都从本对象共享或借用 context，
 // 从而避免多次 CPU↔GPU 传输。
@@ -22,7 +27,13 @@ public:
     virtual GLuint GetTextureId() const = 0;
     virtual uint32_t Width() const = 0;
     virtual uint32_t Height() const = 0;
+    virtual GpuFrameFormat GetFormat() const = 0;
 
     // 从 CPU 内存数据创建 GpuFrame：需要在已有的 EGL 环境下调用
     static std::shared_ptr<GpuFrame> Create(const CapturedFrame &frame, EGLDisplay display, EGLSurface dummySurface, EGLContext context);
+
+    // 从捕捉到的 scRGB 半浮点数据提前转换为 SDR 8bit 后创建 GpuFrame。
+    static std::shared_ptr<GpuFrame> CreateSdr8FromHdr(const CapturedFrame &frame, float sdrWhiteNits,
+                                                       EGLDisplay display, EGLSurface dummySurface,
+                                                       EGLContext context);
 };
