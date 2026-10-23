@@ -34,30 +34,43 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(binding = 0) uniform highp sampler2D u_source;
 
 layout(std430, binding = 0) buffer DetectionBuffer {
-    uint foundHighlight;
     uint peakBits; // 非负 float 的位模式按 uint 比较时保持大小顺序
 } u_detection;
 
 uniform ivec2 u_selectionOrigin;
 uniform ivec2 u_outputSize;
-uniform float u_lw;
+
+const uint kGroupSize = 256u; // local_size_x * local_size_y
+shared float s_peak[kGroupSize];
 
 void main() {
     ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
-    if (gid.x >= u_outputSize.x || gid.y >= u_outputSize.y) {
-        return;
+    uint lid = gl_LocalInvocationIndex;
+
+    // 越界线程不能提前 return，所有线程都必须到达 barrier
+    float peak = 0.0;
+    if (gid.x < u_outputSize.x && gid.y < u_outputSize.y) {
+        vec3 color = texelFetch(u_source, u_selectionOrigin + gid, 0).rgb;
+        peak = max(max(color.r, color.g), color.b);
+        if (!(peak > 0.0)) {
+            peak = 0.0; // 过滤负值与 NaN
+        }
+        peak = min(peak, 65504.0);
+    }
+    s_peak[lid] = peak;
+    barrier();
+
+    // workgroup 内树形归约，每组只做一次全局原子操作
+    for (uint stride = kGroupSize / 2u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) {
+            s_peak[lid] = max(s_peak[lid], s_peak[lid + stride]);
+        }
+        barrier();
     }
 
-    vec3 color = texelFetch(u_source, u_selectionOrigin + gid, 0).rgb;
-    if (any(greaterThan(color, vec3(u_lw)))) {
-        atomicOr(u_detection.foundHighlight, 1u);
+    if (lid == 0u && s_peak[0] > 0.0) {
+        atomicMax(u_detection.peakBits, floatBitsToUint(s_peak[0]));
     }
-
-    float peak = max(max(color.r, color.g), color.b);
-    if (!(peak > 0.0)) {
-        return; // 跳过非正值与 NaN
-    }
-    atomicMax(u_detection.peakBits, floatBitsToUint(min(peak, 65504.0)));
 }
 )";
 
@@ -451,10 +464,10 @@ private:
         ScopedBuffer detectionBuffer;
         ScopedBuffer outputBuffer;
 
-        const uint32_t detectionInit[2] = {0, 0};
+        const uint32_t detectionInit = 0;
         glGenBuffers(1, &detectionBuffer.id);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, detectionBuffer.id);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(detectionInit), detectionInit, GL_DYNAMIC_COPY);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(detectionInit), &detectionInit, GL_DYNAMIC_COPY);
 
         glUseProgram(m_detectProgram);
         glActiveTexture(GL_TEXTURE0);
@@ -462,7 +475,6 @@ private:
         glUniform1i(glGetUniformLocation(m_detectProgram, "u_source"), 0);
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_detectProgram, "u_outputSize"), outputWidth, outputHeight);
-        glUniform1f(glGetUniformLocation(m_detectProgram, "u_lw"), lw * 1.01f); // 容差
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, detectionBuffer.id);
         glDispatchCompute(dispatchX, dispatchY, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
@@ -475,10 +487,10 @@ private:
             throw std::runtime_error("Failed to map detection SSBO");
         }
         const bool usePassThroughSdr = (gpuFrame.GetFormat() == GpuFrameFormat::Sdr8);
-        const bool useHlgPath = !usePassThroughSdr && (mappedDetection[0] != 0u);
         float selectionPeak = 0.0f;
-        std::memcpy(&selectionPeak, &mappedDetection[1], sizeof(selectionPeak));
+        std::memcpy(&selectionPeak, mappedDetection, sizeof(selectionPeak));
         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        const bool useHlgPath = !usePassThroughSdr && selectionPeak > lw * 1.01f; // 容差
         // HLG 编码以 1000nit 为上限，超出部分本就会被裁剪到 1.0
         const float peak = std::clamp(selectionPeak, lw, kReferencePeakNits / kSdrReferenceWhiteNits);
 
