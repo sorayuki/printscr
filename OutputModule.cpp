@@ -35,6 +35,7 @@ layout(binding = 0) uniform highp sampler2D u_source;
 
 layout(std430, binding = 0) buffer DetectionBuffer {
     uint foundHighlight;
+    uint peakBits; // 非负 float 的位模式按 uint 比较时保持大小顺序
 } u_detection;
 
 uniform ivec2 u_selectionOrigin;
@@ -51,6 +52,12 @@ void main() {
     if (any(greaterThan(color, vec3(u_lw)))) {
         atomicOr(u_detection.foundHighlight, 1u);
     }
+
+    float peak = max(max(color.r, color.g), color.b);
+    if (!(peak > 0.0)) {
+        return; // 跳过非正值与 NaN
+    }
+    atomicMax(u_detection.peakBits, floatBitsToUint(min(peak, 65504.0)));
 }
 )";
 
@@ -69,6 +76,7 @@ layout(std430, binding = 0) buffer OutputBuffer {
 uniform ivec2 u_selectionOrigin;
 uniform ivec2 u_outputSize;
 uniform float u_lw;
+uniform float u_peak;
 uniform bool u_useHlgPath;
 uniform bool u_passthroughSdr;
 
@@ -121,7 +129,7 @@ float Bt1886Oetf(float linearValue) {
     return pow(Clamp01(linearValue), 1.0 / kBt1886Gamma);
 }
 
-float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear) {
+float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear, float peakLinear) {
     whiteLinear = max(whiteLinear, kMinWhiteLinear);
     linearValue = max(linearValue, 0.0);
 
@@ -131,10 +139,10 @@ float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear) {
         return normalized * targetWhiteLinear;
     }
 
-    // After the HLG/BT.1886 interpretation path, reference HDR peak maps to
-    // roughly linear 1.0. Roll values above SDR white into the remaining SDR
-    // headroom instead of clipping them directly to pure white.
-    float peakNormalized = max(1.0 / whiteLinear, 1.000001);
+    // Roll values above SDR white into the remaining SDR headroom instead of
+    // clipping them directly. The shoulder ends at the actual content peak so
+    // the brightest pixel in the selection reaches 1.0.
+    float peakNormalized = max(peakLinear / whiteLinear, 1.000001);
     float t = clamp((normalized - 1.0) / (peakNormalized - 1.0), 0.0, 1.0);
     float shoulder = 1.0 - pow(1.0 - t, 2.0);
     return mix(targetWhiteLinear, 1.0, shoulder);
@@ -175,6 +183,7 @@ void main() {
         );
         float sdrWhiteHlg = HlgOetf(u_lw * kScRgbReferenceWhiteNits / kReferencePeakNits);
         float sdrWhiteLinear = max(Bt1886Eotf(sdrWhiteHlg), kMinWhiteLinear);
+        float peakLinear = Bt1886Eotf(HlgOetf(u_peak * kScRgbReferenceWhiteNits / kReferencePeakNits));
         vec3 interpretedLinear = vec3(
             Bt1886Eotf(hlg.r),
             Bt1886Eotf(hlg.g),
@@ -182,9 +191,9 @@ void main() {
         );
         vec3 bt709LinearRaw = Bt2020LinearToBt709Linear(interpretedLinear);
         vec3 bt709Linear = vec3(
-            ToneMapHdrToSdrLinear(bt709LinearRaw.r, sdrWhiteLinear),
-            ToneMapHdrToSdrLinear(bt709LinearRaw.g, sdrWhiteLinear),
-            ToneMapHdrToSdrLinear(bt709LinearRaw.b, sdrWhiteLinear)
+            ToneMapHdrToSdrLinear(bt709LinearRaw.r, sdrWhiteLinear, peakLinear),
+            ToneMapHdrToSdrLinear(bt709LinearRaw.g, sdrWhiteLinear, peakLinear),
+            ToneMapHdrToSdrLinear(bt709LinearRaw.b, sdrWhiteLinear, peakLinear)
         );
         outputColor = vec3(
             Bt1886Oetf(bt709Linear.r),
@@ -442,10 +451,10 @@ private:
         ScopedBuffer detectionBuffer;
         ScopedBuffer outputBuffer;
 
-        uint32_t detectionFlag = 0;
+        const uint32_t detectionInit[2] = {0, 0};
         glGenBuffers(1, &detectionBuffer.id);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, detectionBuffer.id);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(detectionFlag), &detectionFlag, GL_DYNAMIC_COPY);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(detectionInit), detectionInit, GL_DYNAMIC_COPY);
 
         glUseProgram(m_detectProgram);
         glActiveTexture(GL_TEXTURE0);
@@ -460,14 +469,18 @@ private:
 
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, detectionBuffer.id);
         auto *mappedDetection = static_cast<const uint32_t *>(
-            glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, sizeof(uint32_t), GL_MAP_READ_BIT));
+            glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, sizeof(detectionInit), GL_MAP_READ_BIT));
         if (!mappedDetection) {
             eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             throw std::runtime_error("Failed to map detection SSBO");
         }
         const bool usePassThroughSdr = (gpuFrame.GetFormat() == GpuFrameFormat::Sdr8);
-        const bool useHlgPath = !usePassThroughSdr && (*mappedDetection != 0u);
+        const bool useHlgPath = !usePassThroughSdr && (mappedDetection[0] != 0u);
+        float selectionPeak = 0.0f;
+        std::memcpy(&selectionPeak, &mappedDetection[1], sizeof(selectionPeak));
         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        // HLG 编码以 1000nit 为上限，超出部分本就会被裁剪到 1.0
+        const float peak = std::clamp(selectionPeak, lw, kReferencePeakNits / kSdrReferenceWhiteNits);
 
         glGenBuffers(1, &outputBuffer.id);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputBuffer.id);
@@ -481,6 +494,7 @@ private:
         glUniform2i(glGetUniformLocation(m_processProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_processProgram, "u_outputSize"), outputWidth, outputHeight);
         glUniform1f(glGetUniformLocation(m_processProgram, "u_lw"), lw);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_peak"), peak);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_useHlgPath"), useHlgPath ? 1 : 0);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_passthroughSdr"), usePassThroughSdr ? 1 : 0);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, outputBuffer.id);
@@ -507,8 +521,9 @@ private:
             LOG("Compute shader output path selected: SDR 8bit passthrough");
         } else if (useHlgPath) {
             LOG("Compute shader output path selected: HLG. Detection still uses the current SDR white threshold, "
-                "HLG encoding uses the fixed scRGB absolute scale (1.0 = 80 nits), SDR white maps to 0.85, "
-                "and HDR highlights are compressed into the remaining headroom.");
+                "HLG encoding uses the fixed scRGB absolute scale (1.0 = 80 nits), SDR white maps to 0.9345, "
+                "and HDR highlights up to the selection peak (" + std::to_string(peak * kSdrReferenceWhiteNits) +
+                " nits) are compressed into the remaining headroom.");
         } else {
             LOG("Compute shader output path selected: linear-sRGB");
         }

@@ -96,7 +96,7 @@ float Bt1886Oetf(float linearValue) {
     return std::pow(Clamp01(linearValue), 1.0f / kBt1886Gamma);
 }
 
-float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear) {
+float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear, float peakLinear) {
     whiteLinear = (std::max)(whiteLinear, kMinWhiteLinear);
     linearValue = (std::max)(linearValue, 0.0f);
 
@@ -106,10 +106,19 @@ float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear) {
         return normalized * targetWhiteLinear;
     }
 
-    const float peakNormalized = (std::max)(1.0f / whiteLinear, 1.000001f);
+    // 肩部终点为画面实际峰值，保证最亮像素能达到 1.0
+    const float peakNormalized = (std::max)(peakLinear / whiteLinear, 1.000001f);
     const float t = std::clamp((normalized - 1.0f) / (peakNormalized - 1.0f), 0.0f, 1.0f);
     const float shoulder = 1.0f - std::pow(1.0f - t, 2.0f);
     return targetWhiteLinear + (1.0f - targetWhiteLinear) * shoulder;
+}
+
+float LinearToSrgb(float linearValue) {
+    linearValue = Clamp01(linearValue);
+    if (linearValue <= 0.0031308f) {
+        return linearValue * 12.92f;
+    }
+    return 1.055f * std::pow(linearValue, 1.0f / 2.4f) - 0.055f;
 }
 
 uint8_t FloatToByte(float value) {
@@ -131,12 +140,37 @@ std::vector<uint8_t> ConvertCapturedFrameToSdr8(const CapturedFrame &frame, floa
     std::vector<uint8_t> pixels(pixelCount * 4);
     const auto *source = reinterpret_cast<const uint16_t *>(frame.pixelData.data());
 
+    // 统计画面峰值；与输出模块一致，没有超过 SDR 白点的内容时走线性 sRGB 路径
+    float framePeak = 0.0f;
+    for (size_t i = 0; i < pixelCount * 4; ++i) {
+        if ((i & 3) == 3) {
+            continue;
+        }
+        const float value = HalfToFloat(source[i]);
+        if (value > framePeak && std::isfinite(value)) {
+            framePeak = value;
+        }
+    }
+    const bool useHlgPath = framePeak > lw * 1.01f;
+    const float peak = std::clamp(framePeak, lw, kReferencePeakNits / kScRgbReferenceWhiteNits);
+    const float peakLinear = Bt1886Eotf(HlgOetf(peak * kScRgbReferenceWhiteNits / kReferencePeakNits));
+    LOG("GpuFrame: 画面峰值 " + std::to_string(framePeak * kScRgbReferenceWhiteNits) + " nits, 使用" +
+        (useHlgPath ? "HLG 高光压缩路径" : "线性 sRGB 路径"));
+
     for (size_t i = 0; i < pixelCount; ++i) {
         const Float3 scRgb = {
             (std::max)(HalfToFloat(source[i * 4 + 0]), 0.0f),
             (std::max)(HalfToFloat(source[i * 4 + 1]), 0.0f),
             (std::max)(HalfToFloat(source[i * 4 + 2]), 0.0f)
         };
+
+        if (!useHlgPath) {
+            pixels[i * 4 + 0] = FloatToByte(LinearToSrgb(scRgb.r / lw));
+            pixels[i * 4 + 1] = FloatToByte(LinearToSrgb(scRgb.g / lw));
+            pixels[i * 4 + 2] = FloatToByte(LinearToSrgb(scRgb.b / lw));
+            pixels[i * 4 + 3] = 255;
+            continue;
+        }
 
         const Float3 bt2020 = SrgbLinearToBt2020Linear(scRgb);
         const Float3 hlg = {
@@ -147,9 +181,9 @@ std::vector<uint8_t> ConvertCapturedFrameToSdr8(const CapturedFrame &frame, floa
         const Float3 interpreted = {Bt1886Eotf(hlg.r), Bt1886Eotf(hlg.g), Bt1886Eotf(hlg.b)};
         const Float3 bt709Raw = Bt2020LinearToBt709Linear(interpreted);
         const Float3 bt709ToneMapped = {
-            ToneMapHdrToSdrLinear(bt709Raw.r, sdrWhiteLinear),
-            ToneMapHdrToSdrLinear(bt709Raw.g, sdrWhiteLinear),
-            ToneMapHdrToSdrLinear(bt709Raw.b, sdrWhiteLinear)
+            ToneMapHdrToSdrLinear(bt709Raw.r, sdrWhiteLinear, peakLinear),
+            ToneMapHdrToSdrLinear(bt709Raw.g, sdrWhiteLinear, peakLinear),
+            ToneMapHdrToSdrLinear(bt709Raw.b, sdrWhiteLinear, peakLinear)
         };
 
         pixels[i * 4 + 0] = FloatToByte(Bt1886Oetf(bt709ToneMapped.r));
