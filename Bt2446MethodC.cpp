@@ -111,14 +111,17 @@ float SolveK3(float k1, float kneeHdrNits, float hdrReferenceWhiteNits, float sd
 
 class Bt2446MethodCImpl final : public Bt2446MethodC {
 public:
-    Bt2446MethodCImpl() {
+    // anchorNits：被映射到 SDR 参考白电平的那个 HDR 亮度。默认参数取值即 HDR 参考白 203 nits；
+    // 传入画面实测峰值后，同一条对数肩部会被拉宽，峰值落在 96% 而不是被裁成纯白。
+    explicit Bt2446MethodCImpl(float anchorNits) {
         m_params.alpha = kDefaultAlpha;
         m_params.k1 = kDefaultK1;
         m_params.hdrPeakNits = kDefaultHdrPeakNits;
         m_params.sdrPeakNits = kDefaultSdrPeakNits;
         m_params.kneeHdrNits = std::max(kDefaultKneeSdrNits / m_params.k1, 0.0001f);
-        m_params.k3 = SolveK3(m_params.k1, m_params.kneeHdrNits, kDefaultHdrReferenceWhiteNits,
-                              kDefaultSdrReferenceWhitePercent);
+        m_params.anchorNits = std::clamp(anchorNits, Bt2446MethodC::kMinAnchorNits, Bt2446MethodC::kMaxAnchorNits);
+        m_params.k3 =
+            SolveK3(m_params.k1, m_params.kneeHdrNits, m_params.anchorNits, kDefaultSdrReferenceWhitePercent);
         m_params.k2 = m_params.k1 * (1.0f - m_params.k3) * m_params.kneeHdrNits;
         m_params.k4 = m_params.k1 * m_params.kneeHdrNits - m_params.k2 * std::log(1.0f - m_params.k3);
     }
@@ -174,4 +177,10 @@ private:
 
 } // namespace
 
-std::unique_ptr<Bt2446MethodC> Bt2446MethodC::Create() { return std::make_unique<Bt2446MethodCImpl>(); }
+std::unique_ptr<Bt2446MethodC> Bt2446MethodC::Create() {
+    return std::make_unique<Bt2446MethodCImpl>(kDefaultHdrReferenceWhiteNits);
+}
+
+std::unique_ptr<Bt2446MethodC> Bt2446MethodC::CreateForHdrPeak(float hdrPeakNits) {
+    return std::make_unique<Bt2446MethodCImpl>(hdrPeakNits);
+}

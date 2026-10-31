@@ -417,8 +417,9 @@ public:
         LOG("BT.2446-1 method C (default): alpha=" + std::to_string(params.alpha) +
             ", k1=" + std::to_string(params.k1) + ", k2=" + std::to_string(params.k2) +
             ", k3=" + std::to_string(params.k3) + ", k4=" + std::to_string(params.k4) +
-            ", knee=" + std::to_string(params.kneeHdrNits) + " nits, HDR peak=" +
-            std::to_string(params.hdrPeakNits) + " nits, SDR peak=" + std::to_string(params.sdrPeakNits) + " nits");
+            ", knee=" + std::to_string(params.kneeHdrNits) + " nits, anchor=" +
+            std::to_string(params.anchorNits) + " nits, SDR peak=" + std::to_string(params.sdrPeakNits) +
+            " nits; 实际投射时锚点取选区实测峰值（夹在 203~4000 nits）");
     }
 
     ~OutputModuleImpl() {
@@ -509,7 +510,13 @@ private:
         glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(outputPixels * sizeof(uint32_t)), nullptr,
                      GL_DYNAMIC_COPY);
 
-        const Bt2446MethodCParams &params = m_methodC->Params();
+        // 用选区实测峰值作方法 C 的映射锚点：该亮度落到 96% SDR 信号，
+        // 对数肩部因此随画面峰值展宽，高光在线性 1.0 之前就被压进 SDR 范围内。
+        std::unique_ptr<Bt2446MethodC> toneMapper;
+        if (useToneMap) {
+            toneMapper = Bt2446MethodC::CreateForHdrPeak(selectionPeak * kScRgbWhiteNits);
+        }
+        const Bt2446MethodCParams &params = toneMapper ? toneMapper->Params() : m_methodC->Params();
 
         glUseProgram(m_processProgram);
         glActiveTexture(GL_TEXTURE0);
@@ -551,9 +558,11 @@ private:
         if (usePassThroughSdr) {
             LOG("Compute shader output path selected: SDR 8bit passthrough");
         } else if (useToneMap) {
-            LOG("Compute shader output path selected: BT.2446-1 method C (default parameters). "
-                "Selection peak=" + std::to_string(selectionPeak * kScRgbWhiteNits) +
-                " nits, HDR reference white 203 nits maps to 96% SDR signal, output encoded as sRGB.");
+            LOG("Compute shader output path selected: BT.2446-1 method C. Selection peak=" +
+                std::to_string(selectionPeak * kScRgbWhiteNits) + " nits, mapping anchor=" +
+                std::to_string(params.anchorNits) + " nits (maps to 96% SDR signal), k2=" +
+                std::to_string(params.k2) + ", k3=" + std::to_string(params.k3) + ", k4=" +
+                std::to_string(params.k4) + ", output encoded as sRGB.");
         } else {
             LOG("Compute shader output path selected: linear-sRGB");
         }

@@ -91,7 +91,15 @@ std::vector<uint8_t> ConvertCapturedFrameToSdr8(const CapturedFrame &frame, floa
     LOG("GpuFrame: 画面峰值 " + std::to_string(framePeak * kScRgbWhiteNits) + " nits, 使用" +
         (needsToneMap ? " BT.2446-1 方法 C 色调映射" : "线性 sRGB 直通"));
 
-    const std::unique_ptr<Bt2446MethodC> methodC = needsToneMap ? Bt2446MethodC::Create() : nullptr;
+    // 画面峰值同时作为方法 C 的映射锚点，高光随峰值展宽而不再被裁成纯白
+    const std::unique_ptr<Bt2446MethodC> methodC =
+        needsToneMap ? Bt2446MethodC::CreateForHdrPeak(framePeak * kScRgbWhiteNits) : nullptr;
+    if (methodC) {
+        const Bt2446MethodCParams &params = methodC->Params();
+        LOG("GpuFrame: 方法 C 锚点 " + std::to_string(params.anchorNits) + " nits, k2=" +
+            std::to_string(params.k2) + ", k3=" + std::to_string(params.k3) + ", k4=" +
+            std::to_string(params.k4));
+    }
 
     for (size_t i = 0; i < pixelCount; ++i) {
         const float r = (std::max)(HalfToFloat(source[i * 4 + 0]), 0.0f);
