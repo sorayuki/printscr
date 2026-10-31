@@ -22,8 +22,9 @@ namespace {
 
 // scRGB 里 1.0 对应的绝对亮度（Windows 进阶色彩约定）
 constexpr float kScRgbWhiteNits = 80.0f;
-// libultrahdr 线性 HDR 意图的约定：半浮点 1.0 = 203 nits，上限 10000 nits
-constexpr float kHdrIntentWhiteNits = 203.0f;
+// libultrahdr 内部把“线性 HDR 意图 1.0”以及增益图元数据里的 capacity 都按 203 nits 表达，
+// 仅用于和库的 API 换算；真正的归一化基准是抓屏时系统的 SDR 白点（见 BuildHdrIntentPixels）。
+constexpr float kUhdrRefWhiteNits = 203.0f;
 constexpr float kHdrIntentMaxNits = 10000.0f;
 constexpr char kIniFileName[] = "printscr.ini";
 constexpr char kIniSection[] = "output";
@@ -189,9 +190,16 @@ struct EncoderDeleter {
     }
 };
 
-// 把选区内的 scRGB 半浮点数据转成 libultrahdr 线性 HDR 意图要求的 RGBA 半浮点（1.0 = 203 nits）
+// 把选区内的 scRGB 半浮点数据转成 libultrahdr 线性 HDR 意图要求的 RGBA 半浮点。
+//
+// 增益图是“HDR 线性值 / SDR 线性值”的比值，两边必须以同一个白点归一化：
+//   - SDR 基础层是普通 8bit 图像，它的 1.0 会被播放端按“本机 SDR 白点”显示；
+//   - 所以 HDR 层也要以“1.0 = 本机 SDR 白点”为单位，即 scRGB 值 × (80 / sdrWhiteNits)。
+// 直接用库文档里的 203 nits 只在系统 SDR 白点恰好是 203 nits 时才对；白点低于它（例如
+// 80 nits）而仍按 203 归一化，会得到一个偏小的 boost，播放端按本机白点还原后整体变暗
+// 203/80 倍。sdrWhiteNits <= 0 时退回 203（即库的默认参考白）。
 std::vector<uint16_t> BuildHdrIntentPixels(const CapturedFrame &frame, int sourceLeft, int sourceTop, uint32_t width,
-                                           uint32_t height) {
+                                           uint32_t height, float sdrWhiteNits) {
     if (frame.pixelData.empty()) {
         throw std::runtime_error("Captured frame has no pixel data");
     }
@@ -206,8 +214,10 @@ std::vector<uint16_t> BuildHdrIntentPixels(const CapturedFrame &frame, int sourc
         throw std::runtime_error("Captured frame pixel buffer is smaller than expected");
     }
 
-    const float scale = kScRgbWhiteNits / kHdrIntentWhiteNits;
-    const float maxValue = kHdrIntentMaxNits / kHdrIntentWhiteNits;
+    const float whiteNits = (sdrWhiteNits > 0.0f) ? sdrWhiteNits : kUhdrRefWhiteNits;
+    const float scale = kScRgbWhiteNits / whiteNits;
+    // 库对线性意图的像素值有上限 10000 / 203（浮点表示的上限），用它防止溢出
+    const float maxValue = kHdrIntentMaxNits / kUhdrRefWhiteNits;
     const uint16_t halfOne = DirectX::PackedVector::XMConvertFloatToHalf(1.0f);
 
     std::vector<uint16_t> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
@@ -267,9 +277,16 @@ UltraHdrEncodeOptions LoadUltraHdrEncodeOptions() {
 
     options.targetDisplayPeakNits = ReadFloat(values, "target_display_peak_nits", options.targetDisplayPeakNits);
     if (options.targetDisplayPeakNits > 0.0f) {
-        options.targetDisplayPeakNits = std::clamp(options.targetDisplayPeakNits, 203.0f, 10000.0f);
+        options.targetDisplayPeakNits = std::clamp(options.targetDisplayPeakNits, 20.0f, 10000.0f);
     } else {
         options.targetDisplayPeakNits = 0.0f;
+    }
+
+    options.sdrWhiteNits = ReadFloat(values, "sdr_white_nits", options.sdrWhiteNits);
+    if (options.sdrWhiteNits > 0.0f) {
+        options.sdrWhiteNits = std::clamp(options.sdrWhiteNits, 20.0f, 1000.0f);
+    } else {
+        options.sdrWhiteNits = 0.0f;
     }
 
     const std::string preset = ToLower(Trim(FindValue(values, "preset")));
@@ -281,6 +298,7 @@ UltraHdrEncodeOptions LoadUltraHdrEncodeOptions() {
         ", multi_channel=" + std::to_string(options.multiChannelGainmap) +
         ", gamma=" + std::to_string(options.gainmapGamma) +
         ", target_display_peak_nits=" + std::to_string(options.targetDisplayPeakNits) +
+        ", sdr_white_nits=" + std::to_string(options.sdrWhiteNits) +
         ", preset=" + std::string(options.bestQualityPreset ? "best_quality" : "realtime"));
     return options;
 }
@@ -313,8 +331,8 @@ std::wstring ShowUltraHdrSaveDialog() {
 }
 
 bool WriteUltraHdrFile(const std::wstring &path, const std::vector<uint8_t> &sdrBgra, uint32_t width, uint32_t height,
-                       const CapturedFrame &capturedFrame, int sourceLeft, int sourceTop, float displayPeakNits,
-                       const UltraHdrEncodeOptions &options) {
+                       const CapturedFrame &capturedFrame, int sourceLeft, int sourceTop, float sdrWhiteNits,
+                       float displayPeakNits, const UltraHdrEncodeOptions &options) {
     if (path.empty()) {
         return false;
     }
@@ -328,8 +346,11 @@ bool WriteUltraHdrFile(const std::wstring &path, const std::vector<uint8_t> &sdr
         return false;
     }
 
+    const float whiteNits = (sdrWhiteNits > 0.0f) ? sdrWhiteNits : kUhdrRefWhiteNits;
+
     try {
-        std::vector<uint16_t> hdrPixels = BuildHdrIntentPixels(capturedFrame, sourceLeft, sourceTop, width, height);
+        std::vector<uint16_t> hdrPixels =
+            BuildHdrIntentPixels(capturedFrame, sourceLeft, sourceTop, width, height, whiteNits);
         std::vector<uint8_t> sdrRgba = BgraToRgba(sdrBgra);
 
         uhdr_raw_image_t hdrImage{};
@@ -367,14 +388,21 @@ bool WriteUltraHdrFile(const std::wstring &path, const std::vector<uint8_t> &sdr
         CheckUhdr(uhdr_enc_set_gainmap_scale_factor(encoder.get(), options.gainmapScaleFactor),
                   "uhdr_enc_set_gainmap_scale_factor");
         CheckUhdr(uhdr_enc_set_gainmap_gamma(encoder.get(), options.gainmapGamma), "uhdr_enc_set_gainmap_gamma");
+        // 下限兜底：基础层 JPEG 在纯黑区域会有振铃，导致个别像素出现 hdr/sdr 比值 0，
+        // 写进元数据就是 min_content_boost = 0，某些解码端算 log2(0) 会得到 NaN。
+        CheckUhdr(uhdr_enc_set_min_max_content_boost(encoder.get(), 1.0f / 32.0f, 1000.0f),
+                  "uhdr_enc_set_min_max_content_boost");
         CheckUhdr(uhdr_enc_set_using_multi_channel_gainmap(encoder.get(), options.multiChannelGainmap),
                   "uhdr_enc_set_using_multi_channel_gainmap");
         CheckUhdr(uhdr_enc_set_preset(encoder.get(),
                                       options.bestQualityPreset ? UHDR_USAGE_BEST_QUALITY : UHDR_USAGE_REALTIME),
                   "uhdr_enc_set_preset");
-        if (displayPeakNits >= 203.0f) {
-            CheckUhdr(uhdr_enc_set_target_display_peak_brightness(encoder.get(),
-                                                                  (std::min)(displayPeakNits, kHdrIntentMaxNits)),
+        // 库把 capacity（增益图的满量程倍数）按 203 nits 的倍数换算，这里把“以本机 SDR 白点为
+        // 1.0 的显示器峰值”折算成库要的 nits 参数，保证 hdr_capacity_max 仍是真实的峰值倍数。
+        if (displayPeakNits > 0.0f) {
+            const float capacityUnits = displayPeakNits / whiteNits;
+            const float apiNits = std::clamp(capacityUnits * kUhdrRefWhiteNits, kUhdrRefWhiteNits, kHdrIntentMaxNits);
+            CheckUhdr(uhdr_enc_set_target_display_peak_brightness(encoder.get(), apiNits),
                       "uhdr_enc_set_target_display_peak_brightness");
         }
 
@@ -397,8 +425,10 @@ bool WriteUltraHdrFile(const std::wstring &path, const std::vector<uint8_t> &sdr
         }
 
         LOG("Ultra HDR written: " + WideToUtf8(path) + ", " + std::to_string(width) + "x" + std::to_string(height) +
-            ", " + std::to_string(stream->data_sz) + " bytes, display peak=" + std::to_string(displayPeakNits) +
-            " nits, HDR source=(" + std::to_string(sourceLeft) + "," + std::to_string(sourceTop) + ")");
+            ", " + std::to_string(stream->data_sz) + " bytes, SDR white=" + std::to_string(whiteNits) +
+            " nits (HDR layer scaled by " + std::to_string(kScRgbWhiteNits / whiteNits) + "), display peak=" +
+            std::to_string(displayPeakNits) + " nits, HDR source=(" + std::to_string(sourceLeft) + "," +
+            std::to_string(sourceTop) + ")");
         return true;
     } catch (const std::exception &ex) {
         LOG(std::string("Ultra HDR encoding failed: ") + ex.what());

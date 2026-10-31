@@ -476,18 +476,21 @@ public:
         std::vector<uint8_t> bgraPixels = ConvertSelection(gpuFrame, clampedSelection, sdrWhiteNits);
 
         UltraHdrEncodeOptions options = LoadUltraHdrEncodeOptions();
+        // 增益图以“1.0 = SDR 白点”归一化，锚点必须用系统实测 SDR 白点；ini 可覆盖
+        const float sdrWhiteForHdr = (options.sdrWhiteNits > 0.0f) ? options.sdrWhiteNits : sdrWhiteNits;
         float displayPeakNits = options.targetDisplayPeakNits;
         if (!(displayPeakNits > 0.0f)) {
             // 未在 ini 指定时用显示器实测 HDR 峰值，它决定 gain map 的 hdr_capacity_max
             displayPeakNits = hdrInfo.maxLuminance;
-            if (!(displayPeakNits >= 203.0f)) {
+            if (!(displayPeakNits >= sdrWhiteForHdr)) {
                 displayPeakNits = 1000.0f;
             }
         }
 
         if (!WriteUltraHdrFile(path, bgraPixels, static_cast<uint32_t>(clampedSelection.Width()),
                                static_cast<uint32_t>(clampedSelection.Height()), capturedFrame,
-                               clampedSelection.Left(), clampedSelection.Top(), displayPeakNits, options)) {
+                               clampedSelection.Left(), clampedSelection.Top(), sdrWhiteForHdr, displayPeakNits,
+                               options)) {
             throw std::runtime_error("Failed to write Ultra HDR file");
         }
     }

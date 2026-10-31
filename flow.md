@@ -77,9 +77,12 @@
 
 * **SDR 层（基础图）**：直接复用第 4 节那条 GPU 路径的输出，与回车写入剪贴板的像素逐像素一致（BT.2446-1 方法 C 压缩后的 8bit sRGB）。
 * **HDR 层（增益图来源）**：从 `CapturedFrame` 里取同一区域的原始 scRGB 半浮点数据，不经过任何色调映射。
-* **亮度基准换算**：libultrahdr 的线性 HDR 意图约定半浮点 `1.0 = 203 nits`，而 scRGB 是 `1.0 = 80 nits`，因此 HDR 层数值整体乘 `80/203`（负值/NaN 归零，上限裁到 `10000/203`）。
+* **亮度基准换算**：scRGB 是 `1.0 = 80 nits` 的绝对亮度，而增益图是「HDR / SDR」的**比值**，两层必须用同一个白点归一化。基础层是普通 8bit 图像，它的 `1.0` 会被播放端按**本机 SDR 白点**显示，所以 HDR 层也按「`1.0` = 本机 SDR 白点」归一化：`HDR值 = scRGB值 × 80 / sdrWhiteNits`。
+  - 之前用库文档里的固定参考白 203 nits，只在系统 SDR 白点恰好是 203 nits 时才对。本机实测 SDR 白点是 **80 nits**（`DisplayHdrInfo::sdrWhiteLevel`，与系统 HDR 截图 jxr 里页面白的 80 nits 一致），仍按 203 归一化会得到偏小约 2.5 倍的 boost，播放端按本机白点还原后整幅画面暗 203/80 倍（实测 mean 4.78 nits，真值 12.0 nits）。
+  - `sdr_white_nits` 可在 ini 里覆盖，缺省 0 = 用系统实测值。
 * **色彩约定**：两层都标 BT.709；HDR 层传递函数 `LINEAR`，SDR 层 `SRGB`，范围 full。
-* **编码参数**：质量、增益图质量、下采样倍数、单/多通道、gamma、目标显示峰值、预设都从 `printscr.ini` 的 `[output]` 段读取。目标显示峰值写入增益图元数据的 `hdr_capacity_max`，未指定时取显示器实测 HDR 峰值。
+* **编码参数**：质量、增益图质量、下采样倍数、单/多通道、gamma、目标显示峰值、预设都从 `printscr.ini` 的 `[output]` 段读取。目标显示峰值决定增益图元数据的 `hdr_capacity_max`，它同样以 SDR 白点为 1.0，故传给库时按 `peak / sdrWhite × 203` 折算（库内部用 203 表达 capacity）。
+* **min_content_boost 兜底**：基础层 JPEG 在纯黑区域会有振铃，个别像素会出现 `hdr/sdr = 0`，直接写进元数据会让解码端算 `log2(0)` 得到 NaN，故编码时给下限 `1/32`。
 * **与 CapsLock 模式的关系**：CapsLock 模式下 SDR 层是整帧提前转换后的直通结果，HDR 层仍是原始 scRGB，两者差值就是方法 C 的压缩曲线，增益图会把它如实编码下来，HDR 端依旧能还原原始画面。
 
 ## 附：CapsLock 提前转换模式

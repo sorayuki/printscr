@@ -81,7 +81,8 @@ libultrahdr 构建参数（与主工程保持一致，都是 x64 + /MD）：
 | `gainmap_scale_factor` | 4 | 增益图相对基础图的下采样倍数 |
 | `multi_channel_gainmap` | 1 | 1 = 三分量增益图，0 = 单通道 |
 | `gainmap_gamma` | 1.0 | 增益图编码 gamma |
-| `target_display_peak_nits` | 0 | 0 = 自动取显示器实测 HDR 峰值，否则 203~10000 |
+| `target_display_peak_nits` | 0 | 0 = 自动取显示器实测 HDR 峰值，否则 20~10000 |
+| `sdr_white_nits` | 0 | 0 = 自动取系统实测 SDR 白点；增益图的归一化基准 |
 | `preset` | best_quality | `best_quality` 或 `realtime` |
 
 
@@ -120,6 +121,7 @@ libultrahdr 构建参数（与主工程保持一致，都是 x64 + /MD）：
 
 - `PreviewWindow::Show` 的返回值由 `SelectionRect` 改为 `PreviewResult { selection, action }`，`action` 取值 `None / Copy / SaveHdr`：回车与选区内双击 → `Copy`，S 键（不区分大小写）→ `SaveHdr`，ESC / 右键 / 关闭窗口 → `None`。选区无效时回车和 S 都不再确认。
 - `SaveHdr` 路径：先弹保存对话框（`GetSaveFileNameW`，默认文件名 `printscr_YYYYMMDD_HHMMSS.jpg`），用户确认后走与剪贴板完全相同的 GPU 转换拿 SDR 8bit 像素作基础层，再从 `CapturedFrame` 同一区域取原始 scRGB 半浮点作 HDR 意图，交给 libultrahdr 编码成 `JPEG + gain map`。
-- 亮度约定：libultrahdr 线性 HDR 意图的半浮点 1.0 = 203 nits，而 scRGB 1.0 = 80 nits，故 HDR 层数值整体乘 `80/203`，上限裁到 `10000/203`。
-- 增益图参数（质量、下采样倍数、单/多通道、gamma、目标显示峰值、编码预设）来自 `printscr.ini` 的 `[output]` 段；文件查找顺序为 exe 目录 → 当前工作目录，构建时会把仓库根目录的样本复制到 exe 旁边。ini 由 `UltraHdrWriter.cpp` 自行解析（支持 UTF-8 中文注释，`GetPrivateProfile*` 只认 ANSI/UTF-16LE）。
-- `target_display_peak_nits=0` 表示自动取显示器实测 HDR 峰值（`DisplayHdrInfo::maxLuminance`，取不到时按 1000），它决定 gain map 元数据里的 `hdr_capacity_max`。
+- 亮度约定：scRGB 1.0 = 80 nits（绝对亮度），而增益图是「HDR / SDR」的比值，两层必须用同一个白点归一化——基础层是普通 8bit 图像，它的 1.0 被播放端按**本机 SDR 白点**显示，所以 HDR 层取 `scRGB × 80 / sdrWhiteNits`。库文档里的固定参考白 203 nits 只在系统 SDR 白点恰好为 203 时成立；本机实测 80 nits，按 203 归一化会让播放端还原后整体暗 2.5 倍（实测 mean 4.78 vs 真值 12.0 nits），改为按实测白点后 mean 12.5 与系统 jxr 的 12.0 一致。
+- 增益图参数（质量、下采样倍数、单/多通道、gamma、目标显示峰值、SDR 白点、编码预设）来自 `printscr.ini` 的 `[output]` 段；文件查找顺序为 exe 目录 → 当前工作目录，构建时会把仓库根目录的样本复制到 exe 旁边。ini 由 `UltraHdrWriter.cpp` 自行解析（支持 UTF-8 中文注释，`GetPrivateProfile*` 只认 ANSI/UTF-16LE）。
+- `target_display_peak_nits=0` 表示自动取显示器实测 HDR 峰值（`DisplayHdrInfo::maxLuminance`，取不到时按 1000），它决定 gain map 元数据里的 `hdr_capacity_max`；该字段同样以 SDR 白点为 1.0，传给库时按 `peak / sdrWhite × 203` 折算（库内部用 203 表达 capacity）。`sdr_white_nits=0` 表示自动取系统实测 SDR 白点。
+- `min_content_boost` 兜底为 1/32：基础层 JPEG 在纯黑区域的振铃会让个别像素出现 `hdr/sdr = 0`，写进元数据后解码端 `log2(0)` 会得 NaN。

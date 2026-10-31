@@ -14,6 +14,7 @@ struct UltraHdrEncodeOptions {
     int   multiChannelGainmap = 1;      // 1 = 三分量增益图
     float gainmapGamma = 1.0f;          // 增益图编码 gamma
     float targetDisplayPeakNits = 0.0f; // 目标显示峰值亮度；0 = 用显示器实测 HDR 峰值
+    float sdrWhiteNits = 0.0f;          // 归一化用的 SDR 白点；0 = 用系统实测值
     bool  bestQualityPreset = true;     // true = best_quality，false = realtime
 };
 
@@ -27,6 +28,8 @@ std::wstring ShowUltraHdrSaveDialog();
 // 基础图层直接用 sdrBgra（与剪贴板内容逐像素一致），增益图由 capturedFrame 里同一区域的
 // scRGB 数据生成，因此 HDR 显示端还原出来的是原始截取画面。
 // sourceLeft/sourceTop 为选区在 capturedFrame 中的左上角坐标，width/height 为选区尺寸。
+// sdrWhiteNits 是基础图层里“1.0 代表多少 nits”的锚点：增益图是相对 SDR 白点的比值，
+// 必须用抓屏时系统真正的 SDR 白点，否则播放端整体亮度会差 sdrWhiteNits / 203 倍。
 bool WriteUltraHdrFile(const std::wstring &path, const std::vector<uint8_t> &sdrBgra, uint32_t width,
                        uint32_t height, const CapturedFrame &capturedFrame, int sourceLeft, int sourceTop,
-                       float displayPeakNits, const UltraHdrEncodeOptions &options);
+                       float sdrWhiteNits, float displayPeakNits, const UltraHdrEncodeOptions &options);
