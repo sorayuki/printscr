@@ -66,6 +66,7 @@ libultrahdr 构建参数（与主工程保持一致，都是 x64 + /MD）：
 - 产物：`uhdr-static.lib`（core + image_io 合并）、`jpeg-static.lib`（需在 uhdr-static 之后一起链接）、`ultrahdr_api.h`
 - 静态构建无需任何宏；Release/Debug 两套分别放 deps/lib 与 deps/debug/lib
 - 示例与文档参考：`refcode/libultrahdr/`（ultrahdr_app.cpp、docs、LICENSE、COMMIT.txt）
+- 完整构建步骤、兼容性约束与踩坑记录见 `docs/libultrahdr-build.md`
 
 
 # 开发进度记录
