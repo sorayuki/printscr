@@ -214,8 +214,11 @@ void main() {
         // scRGB 线性光 → 绝对亮度（1.0 = 80 cd/m²）→ BT.2020 基色的线性光
         vec3 nits = color * kScRgbWhiteNits;
         vec3 normalized2020 = Rec709ToRec2020(nits) / u_hdrPeakNits;
-        // 方法 C 输出线性 SDR 光（1.0 = SDR 峰值），本项目的输出是 8bit sRGB 编码，需要再做 OETF
-        vec3 sdrLinear = Rec2020ToRec709(MapMethodC(normalized2020));
+        // 方法 C 输出 0~1 的线性 SDR（1.0 = SDR 峰值 = 100 cd/m²）。
+        // 高光不做任何按内容峰值的重映射：对数肩部之上（约 331 cd/m²）的线性值会超过 1.0，
+        // 与参考实现写入 SDR 目标时的行为一致，直接在 SDR 边界裁剪。
+        vec3 sdrLinear = clamp(Rec2020ToRec709(MapMethodC(normalized2020)), vec3(0.0), vec3(1.0));
+        // 参考实现的输出是线性光，本项目写的是 8bit 编码值，故此处补一次 sRGB OETF
         outputColor = vec3(
             LinearToSrgb(sdrLinear.r),
             LinearToSrgb(sdrLinear.g),
