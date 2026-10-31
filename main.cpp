@@ -131,15 +131,21 @@ public:
             }
             std::cout << "GPU frame created." << std::endl;
 
-            SelectionRect selection = m_previewWindow->Show(gpuFrame);
+            PreviewResult result = m_previewWindow->Show(gpuFrame);
+            const SelectionRect &selection = result.selection;
 
-            if (selection.IsValid()) {
+            if (result.action != PreviewAction::None && selection.IsValid()) {
                 std::cout << "Selection confirmed: (" << selection.Left() << ", " << selection.Top() << ") to ("
                           << selection.Right() << ", " << selection.Bottom() << ")" << std::endl;
                 std::cout << "Size: " << selection.Width() << "x" << selection.Height() << std::endl;
 
-                m_outputModule->CopySelectionToClipboard(*gpuFrame, selection, hdrInfo);
-                std::cout << "Selection copied to clipboard." << std::endl;
+                if (result.action == PreviewAction::Copy) {
+                    m_outputModule->CopySelectionToClipboard(*gpuFrame, selection, hdrInfo);
+                    std::cout << "Selection copied to clipboard." << std::endl;
+                } else {
+                    m_outputModule->SaveSelectionAsUltraHdr(*gpuFrame, *frame, selection, hdrInfo);
+                    std::cout << "Selection saved as Ultra HDR file." << std::endl;
+                }
             } else {
                 std::cout << "Selection cancelled." << std::endl;
             }

@@ -2,6 +2,7 @@
 #include "Bt2446MethodC.h"
 #include "GpuFrame.h"
 #include "Logger.h"
+#include "UltraHdrWriter.h"
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -450,6 +451,45 @@ public:
         std::vector<uint8_t> bgraPixels = ConvertSelection(gpuFrame, clampedSelection, sdrWhiteNits);
         WriteBitmapToClipboard(bgraPixels, outputWidth, outputHeight);
         LOG("Selection copied to clipboard as 8-bit bitmap from SSBO output.");
+    }
+
+    void SaveSelectionAsUltraHdr(const GpuFrame &gpuFrame, const CapturedFrame &capturedFrame,
+                                 const SelectionRect &selection, const DisplayHdrInfo &hdrInfo) override {
+        const SelectionRect clampedSelection = ClampSelectionToFrame(selection, gpuFrame.Width(), gpuFrame.Height());
+        if (!clampedSelection.IsValid()) {
+            throw std::runtime_error("Selection is empty after clamping");
+        }
+
+        LOG("Save-as-Ultra-HDR requested. Rect=(" + std::to_string(clampedSelection.Left()) + "," +
+            std::to_string(clampedSelection.Top()) + ")-(" + std::to_string(clampedSelection.Right()) + "," +
+            std::to_string(clampedSelection.Bottom()) + ")");
+
+        // 先弹对话框：用户在预览窗口关闭后立即看到它，不必等色调映射跑完
+        const std::wstring path = ShowUltraHdrSaveDialog();
+        if (path.empty()) {
+            LOG("Ultra HDR save cancelled by user.");
+            return;
+        }
+
+        const float sdrWhiteNits = ResolveSdrWhiteNits(hdrInfo.sdrWhiteLevel);
+        // 基础层与剪贴板内容逐像素一致：同一段 GPU 处理流程
+        std::vector<uint8_t> bgraPixels = ConvertSelection(gpuFrame, clampedSelection, sdrWhiteNits);
+
+        UltraHdrEncodeOptions options = LoadUltraHdrEncodeOptions();
+        float displayPeakNits = options.targetDisplayPeakNits;
+        if (!(displayPeakNits > 0.0f)) {
+            // 未在 ini 指定时用显示器实测 HDR 峰值，它决定 gain map 的 hdr_capacity_max
+            displayPeakNits = hdrInfo.maxLuminance;
+            if (!(displayPeakNits >= 203.0f)) {
+                displayPeakNits = 1000.0f;
+            }
+        }
+
+        if (!WriteUltraHdrFile(path, bgraPixels, static_cast<uint32_t>(clampedSelection.Width()),
+                               static_cast<uint32_t>(clampedSelection.Height()), capturedFrame,
+                               clampedSelection.Left(), clampedSelection.Top(), displayPeakNits, options)) {
+            throw std::runtime_error("Failed to write Ultra HDR file");
+        }
     }
 
 private:

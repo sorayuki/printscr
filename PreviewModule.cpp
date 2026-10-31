@@ -23,7 +23,7 @@ public:
 
     ~PreviewWindowImpl() { CleanupGL(); }
 
-    SelectionRect Show(std::shared_ptr<GpuFrame> gpuFrame) override {
+    PreviewResult Show(std::shared_ptr<GpuFrame> gpuFrame) override {
         LOG("PreviewWindow::Show called.");
         m_gpuFrame = gpuFrame;
         m_useSdrSurface = (m_gpuFrame->GetFormat() == GpuFrameFormat::Sdr8);
@@ -62,7 +62,7 @@ public:
         }
 
         m_running = true;
-        m_selectionConfirmed = false;
+        m_action = PreviewAction::None;
         m_selection = {0, 0, 0, 0};
         m_needsRender = true;
         m_currentSwapInterval = -1;
@@ -141,7 +141,13 @@ public:
         }
 
         LOG("Surface cleanup done. Show returning.");
-        return m_selectionConfirmed ? m_selection : SelectionRect{0, 0, 0, 0};
+
+        PreviewResult result;
+        result.action = m_action;
+        if (m_action != PreviewAction::None) {
+            result.selection = m_selection;
+        }
+        return result;
     }
 
 private:
@@ -167,7 +173,7 @@ private:
     std::shared_ptr<GpuFrame> m_gpuFrame;
     DisplayHdrInfo m_hdrInfo;
     bool m_running = false;
-    bool m_selectionConfirmed = false;
+    PreviewAction m_action = PreviewAction::None;
 
     SelectionRect m_selection = {0, 0, 0, 0};
     bool m_isDragging = false;
@@ -262,11 +268,20 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         case WM_KEYDOWN:
             // LOG("WM_KEYDOWN: " + std::to_string(wParam));
             if (wParam == VK_ESCAPE) {
-                self->m_selectionConfirmed = false;
+                self->m_action = PreviewAction::None;
                 self->m_running = false;
             } else if (wParam == VK_RETURN) {
-                self->m_selectionConfirmed = true;
-                self->m_running = false;
+                if (self->m_selection.IsValid()) {
+                    self->m_action = PreviewAction::Copy;
+                    self->m_running = false;
+                }
+            } else if (wParam == 'S') {
+                // 大小写锁定不影响：WM_KEYDOWN 的虚拟键码不区分大小写
+                if (self->m_selection.IsValid()) {
+                    LOG("Save hotkey pressed (S).");
+                    self->m_action = PreviewAction::SaveHdr;
+                    self->m_running = false;
+                }
             }
             return 0;
         case WM_LBUTTONDOWN: {
@@ -398,7 +413,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 int b = self->m_selection.Bottom();
 
                 if (x > l && x < r && y > t && y < b) {
-                    self->m_selectionConfirmed = true;
+                    self->m_action = PreviewAction::Copy;
                     self->m_running = false;
                 }
             }
@@ -411,7 +426,7 @@ LRESULT CALLBACK PreviewWindowImpl::WndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         }
         case WM_RBUTTONUP: {
             LOG("WM_RBUTTONUP");
-            self->m_selectionConfirmed = false;
+            self->m_action = PreviewAction::None;
             self->m_running = false;
             return 0;
         }

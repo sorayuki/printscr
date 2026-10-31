@@ -13,7 +13,7 @@ set(DEPS_DIR "${CMAKE_SOURCE_DIR}/deps")
 include_directories(${DEPS_DIR}/include)
 
 add_executable(printscr main.cpp ScreenCapture.cpp SystemInfo.cpp GpuFrame.cpp PreviewModule.cpp OutputModule.cpp
-                        Bt2446MethodC.cpp)
+                        Bt2446MethodC.cpp UltraHdrWriter.cpp)
 
 # Link Libraries
 target_link_libraries(printscr PRIVATE
@@ -21,6 +21,7 @@ target_link_libraries(printscr PRIVATE
     dxgi
     dwmapi
     windowsapp
+    comdlg32
     
     $<$<CONFIG:Debug>:${DEPS_DIR}/debug/lib/libEGL.lib>
     $<$<CONFIG:Debug>:${DEPS_DIR}/debug/lib/libGLESv2.lib>
@@ -46,4 +47,11 @@ add_custom_command(TARGET printscr POST_BUILD
     $<$<NOT:$<CONFIG:Debug>>:${DEPS_DIR}/bin/libGLESv2.dll>
     $<$<NOT:$<CONFIG:Debug>>:${DEPS_DIR}/bin/zlib1.dll>
     $<TARGET_FILE_DIR:printscr>
+)
+
+# 配置文件样本：与可执行文件放在一起，程序优先从 exe 目录读取 printscr.ini
+add_custom_command(TARGET printscr POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_SOURCE_DIR}/printscr.ini
+    $<TARGET_FILE_DIR:printscr>/printscr.ini
 )

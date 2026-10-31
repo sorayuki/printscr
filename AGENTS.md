@@ -68,6 +68,22 @@ libultrahdr 构建参数（与主工程保持一致，都是 x64 + /MD）：
 - 示例与文档参考：`refcode/libultrahdr/`（ultrahdr_app.cpp、docs、LICENSE、COMMIT.txt）
 - 完整构建步骤、兼容性约束与踩坑记录见 `docs/libultrahdr-build.md`
 
+## 配置文件（printscr.ini）
+
+仓库根目录的 `printscr.ini` 是样本，构建时复制到 exe 目录；程序按 exe 目录 → 当前工作目录的顺序查找。
+
+`[output]` 段控制 Ultra HDR（S 键保存）的编码参数：
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `quality` | 95 | SDR 基础图层（= 剪贴板内容）JPEG 质量 |
+| `gainmap_quality` | 90 | 增益图 JPEG 质量 |
+| `gainmap_scale_factor` | 4 | 增益图相对基础图的下采样倍数 |
+| `multi_channel_gainmap` | 1 | 1 = 三分量增益图，0 = 单通道 |
+| `gainmap_gamma` | 1.0 | 增益图编码 gamma |
+| `target_display_peak_nits` | 0 | 0 = 自动取显示器实测 HDR 峰值，否则 203~10000 |
+| `preset` | best_quality | `best_quality` 或 `realtime` |
+
 
 # 开发进度记录
 
@@ -98,3 +114,12 @@ libultrahdr 构建参数（与主工程保持一致，都是 x64 + /MD）：
 [x] HDR→SDR 逻辑整体替换为 ITU-R BT.2446-1 方法 C（参数取方法默认值，与 obs-bt2446 工程的 method C 默认参数一致）：新增 Bt2446MethodC（CPU 实现，供 CapsLock 提前转换使用），输出模块改为在 compute shader 中实现同一套方法 C，GPU/CPU 共用同一份参数；输入侧确认 scRGB 1.0=80nit 与参考工程一致，输出侧因本项目写 8bit 而非线性光，额外补了一次 sRGB OETF；同时更新 flow.md 的管线描述
 [x] 方法 C 的高光不再固定裁成纯白：把选区（CapsLock 模式下为整帧）实测峰值作为映射锚点代入 k2/k3/k4 的求解（`Bt2446MethodC::CreateForHdrPeak`，锚点夹在 203~4000 nits）。确认参考实现里的 `hdr_peak_nits` 在方法 C 中是“先除后乘”的空转参数，直接填实测峰值不会改变任何像素，峰值只能通过锚点影响曲线
 [x] 引入 libultrahdr 2.0.2：在临时目录用 VS 2026 x64 + /MD 构建静态库，产物（ultrahdr_api.h、uhdr-static.lib、jpeg-static.lib，Release/Debug 各一套）放入 deps 并接入 CMakeLists；示例与文档留存在 refcode/libultrahdr/
+[x] 当用户使用框选功能选完区域之后，如果按回车，按照现有的方法压缩范围并存入剪贴板；如果按的是s键，无论大小写，都在退出选取界面之后，弹出保存文件对话框，如果对话框返回了OK，则使用libultrahdr以两层HDR形式保存文件，其中sdr层内容为存入剪贴板的，hdr层为截取的部分原图。保存所需参数（例如画质）从printscr.ini中读取，printscr.ini的默认样本需要创建一个放在当前目录下
+
+实现说明（输出模块新增 `UltraHdrWriter.h/.cpp`）：
+
+- `PreviewWindow::Show` 的返回值由 `SelectionRect` 改为 `PreviewResult { selection, action }`，`action` 取值 `None / Copy / SaveHdr`：回车与选区内双击 → `Copy`，S 键（不区分大小写）→ `SaveHdr`，ESC / 右键 / 关闭窗口 → `None`。选区无效时回车和 S 都不再确认。
+- `SaveHdr` 路径：先弹保存对话框（`GetSaveFileNameW`，默认文件名 `printscr_YYYYMMDD_HHMMSS.jpg`），用户确认后走与剪贴板完全相同的 GPU 转换拿 SDR 8bit 像素作基础层，再从 `CapturedFrame` 同一区域取原始 scRGB 半浮点作 HDR 意图，交给 libultrahdr 编码成 `JPEG + gain map`。
+- 亮度约定：libultrahdr 线性 HDR 意图的半浮点 1.0 = 203 nits，而 scRGB 1.0 = 80 nits，故 HDR 层数值整体乘 `80/203`，上限裁到 `10000/203`。
+- 增益图参数（质量、下采样倍数、单/多通道、gamma、目标显示峰值、编码预设）来自 `printscr.ini` 的 `[output]` 段；文件查找顺序为 exe 目录 → 当前工作目录，构建时会把仓库根目录的样本复制到 exe 旁边。ini 由 `UltraHdrWriter.cpp` 自行解析（支持 UTF-8 中文注释，`GetPrivateProfile*` 只认 ANSI/UTF-16LE）。
+- `target_display_peak_nits=0` 表示自动取显示器实测 HDR 峰值（`DisplayHdrInfo::maxLuminance`，取不到时按 1000），它决定 gain map 元数据里的 `hdr_capacity_max`。
