@@ -28,6 +28,12 @@ target_link_libraries(printscr PRIVATE
     $<$<NOT:$<CONFIG:Debug>>:${DEPS_DIR}/lib/libEGL.lib>
     $<$<NOT:$<CONFIG:Debug>>:${DEPS_DIR}/lib/libGLESv2.lib>
     $<$<NOT:$<CONFIG:Debug>>:${DEPS_DIR}/lib/zlib.lib>
+
+    # libultrahdr (static, built with /MD; jpeg-static must follow it)
+    $<$<CONFIG:Debug>:${DEPS_DIR}/debug/lib/uhdr-static.lib>
+    $<$<CONFIG:Debug>:${DEPS_DIR}/debug/lib/jpeg-static.lib>
+    $<$<NOT:$<CONFIG:Debug>>:${DEPS_DIR}/lib/uhdr-static.lib>
+    $<$<NOT:$<CONFIG:Debug>>:${DEPS_DIR}/lib/jpeg-static.lib>
 )
 
 # Copy DLLs

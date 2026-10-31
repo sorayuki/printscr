@@ -49,6 +49,25 @@ Windows 11, C++ 20, CMake
 
 后续补充
 
+## 依赖库（deps/）
+
+| 库 | 头文件 | 库文件 | 说明 |
+| --- | --- | --- | --- |
+| ANGLE | deps/include/{EGL,GLES*,KHR} | deps/lib/libEGL.lib, libGLESv2.lib (+ bin/*.dll) | HDR 预览渲染 |
+| zlib | deps/include/zlib.h | deps/lib/zlib.lib | zlib1.dll 的导入库 |
+| libultrahdr v2.0.2 | deps/include/ultrahdr_api.h | deps/lib/uhdr-static.lib + jpeg-static.lib | Ultra HDR (JPEG + gainmap) 编解码，静态库 |
+
+libultrahdr 构建参数（与主工程保持一致，都是 x64 + /MD）：
+
+- 生成器 `Visual Studio 18 2026`，`-A x64`
+- `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>DLL`
+- `-DBUILD_FOR_WINUI=ON`：libultrahdr 在 MSVC + `UHDR_BUILD_DEPS=ON` 时会强制静态库并把运行库改成 /MT，这个开关让它保留 /MD
+- `-DUHDR_BUILD_DEPS=ON`（自带 libjpeg-turbo 静态库）、`-DUHDR_ENABLE_HEIF=OFF`、examples/tests/benchmark/fuzzers/java 全关
+- 产物：`uhdr-static.lib`（core + image_io 合并）、`jpeg-static.lib`（需在 uhdr-static 之后一起链接）、`ultrahdr_api.h`
+- 静态构建无需任何宏；Release/Debug 两套分别放 deps/lib 与 deps/debug/lib
+- 示例与文档参考：`refcode/libultrahdr/`（ultrahdr_app.cpp、docs、LICENSE、COMMIT.txt）
+
+
 # 开发进度记录
 
 如果一个工作项开发完成，请勾选。需求完成后，请自动将其添加到git中提交；
@@ -77,3 +96,4 @@ Windows 11, C++ 20, CMake
 [x] 添加新模式：将hdr到sdr的转换提前到捕捉屏幕后、选择要裁剪的区域前，并将显示预览的窗口初始化时的模式从hdr改为sdr（8bit整数）；仅在截图时大小写锁定键处于大写锁定状态，则使用这种模式。[x] 修复问题：HDR 转 SDR 进入剪贴板时纯白达不到 1.0。高光压缩的终点改为选区（或整帧）实际峰值而非固定 1000nit；CapsLock 提前转换模式在没有超过 SDR 白点的内容时与输出模块一致走线性 sRGB 路径
 [x] HDR→SDR 逻辑整体替换为 ITU-R BT.2446-1 方法 C（参数取方法默认值，与 obs-bt2446 工程的 method C 默认参数一致）：新增 Bt2446MethodC（CPU 实现，供 CapsLock 提前转换使用），输出模块改为在 compute shader 中实现同一套方法 C，GPU/CPU 共用同一份参数；输入侧确认 scRGB 1.0=80nit 与参考工程一致，输出侧因本项目写 8bit 而非线性光，额外补了一次 sRGB OETF；同时更新 flow.md 的管线描述
 [x] 方法 C 的高光不再固定裁成纯白：把选区（CapsLock 模式下为整帧）实测峰值作为映射锚点代入 k2/k3/k4 的求解（`Bt2446MethodC::CreateForHdrPeak`，锚点夹在 203~4000 nits）。确认参考实现里的 `hdr_peak_nits` 在方法 C 中是“先除后乘”的空转参数，直接填实测峰值不会改变任何像素，峰值只能通过锚点影响曲线
+[x] 引入 libultrahdr 2.0.2：在临时目录用 VS 2026 x64 + /MD 构建静态库，产物（ultrahdr_api.h、uhdr-static.lib、jpeg-static.lib，Release/Debug 各一套）放入 deps 并接入 CMakeLists；示例与文档留存在 refcode/libultrahdr/
