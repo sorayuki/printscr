@@ -1,4 +1,5 @@
 #include "GpuFrame.h"
+#include "Bt2446MethodC.h"
 #include "Logger.h"
 
 #include <EGL/egl.h>
@@ -15,21 +16,7 @@
 
 namespace {
 
-constexpr float kBt1886Gamma = 2.4f;
-constexpr float kReferencePeakNits = 1000.0f;
-constexpr float kScRgbReferenceWhiteNits = 80.0f;
-constexpr float kSdrReferenceWhiteNits = 80.0f;
 constexpr float kMinWhiteLinear = 0.000001f;
-constexpr float kTargetWhiteSignal = 0.9345f;
-constexpr float kHlgA = 0.17883277f;
-constexpr float kHlgB = 1.0f - 4.0f * kHlgA;
-constexpr float kHlgC = 0.55991073f;
-
-struct Float3 {
-    float r = 0.0f;
-    float g = 0.0f;
-    float b = 0.0f;
-};
 
 float Clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
@@ -64,55 +51,6 @@ float HalfToFloat(uint16_t value) {
     return result;
 }
 
-Float3 SrgbLinearToBt2020Linear(const Float3 &color) {
-    return {
-        0.6274040f * color.r + 0.3292820f * color.g + 0.0433136f * color.b,
-        0.0690970f * color.r + 0.9195400f * color.g + 0.0113612f * color.b,
-        0.0163916f * color.r + 0.0880132f * color.g + 0.8955950f * color.b
-    };
-}
-
-Float3 Bt2020LinearToBt709Linear(const Float3 &color) {
-    return {
-        1.6604910f * color.r - 0.5876411f * color.g - 0.0728499f * color.b,
-        -0.1245505f * color.r + 1.1328999f * color.g - 0.0083494f * color.b,
-        -0.0181508f * color.r - 0.1005789f * color.g + 1.1187297f * color.b
-    };
-}
-
-float HlgOetf(float linearValue) {
-    linearValue = Clamp01(linearValue);
-    if (linearValue <= (1.0f / 12.0f)) {
-        return std::sqrt(3.0f * linearValue);
-    }
-    return kHlgA * std::log(12.0f * linearValue - kHlgB) + kHlgC;
-}
-
-float Bt1886Eotf(float signalValue) {
-    return std::pow(Clamp01(signalValue), kBt1886Gamma);
-}
-
-float Bt1886Oetf(float linearValue) {
-    return std::pow(Clamp01(linearValue), 1.0f / kBt1886Gamma);
-}
-
-float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear, float peakLinear) {
-    whiteLinear = (std::max)(whiteLinear, kMinWhiteLinear);
-    linearValue = (std::max)(linearValue, 0.0f);
-
-    const float normalized = linearValue / whiteLinear;
-    const float targetWhiteLinear = Bt1886Eotf(kTargetWhiteSignal);
-    if (normalized <= 1.0f) {
-        return normalized * targetWhiteLinear;
-    }
-
-    // 肩部终点为画面实际峰值，保证最亮像素能达到 1.0
-    const float peakNormalized = (std::max)(peakLinear / whiteLinear, 1.000001f);
-    const float t = std::clamp((normalized - 1.0f) / (peakNormalized - 1.0f), 0.0f, 1.0f);
-    const float shoulder = 1.0f - std::pow(1.0f - t, 2.0f);
-    return targetWhiteLinear + (1.0f - targetWhiteLinear) * shoulder;
-}
-
 float LinearToSrgb(float linearValue) {
     linearValue = Clamp01(linearValue);
     if (linearValue <= 0.0031308f) {
@@ -132,15 +70,13 @@ std::vector<uint8_t> ConvertCapturedFrameToSdr8(const CapturedFrame &frame, floa
         throw std::runtime_error("GpuFrame: 无法提前转换 SDR，捕捉帧不是紧凑 RGBA16F 布局");
     }
 
-    const float lw = (std::max)(sdrWhiteNits / kSdrReferenceWhiteNits, kMinWhiteLinear);
-    const float sdrWhiteHlg = HlgOetf(lw * kScRgbReferenceWhiteNits / kReferencePeakNits);
-    const float sdrWhiteLinear = (std::max)(Bt1886Eotf(sdrWhiteHlg), kMinWhiteLinear);
+    const float sdrWhiteScRgb = (std::max)(sdrWhiteNits / kScRgbWhiteNits, kMinWhiteLinear);
 
     const size_t pixelCount = static_cast<size_t>(frame.metadata.width) * frame.metadata.height;
     std::vector<uint8_t> pixels(pixelCount * 4);
     const auto *source = reinterpret_cast<const uint16_t *>(frame.pixelData.data());
 
-    // 统计画面峰值；与输出模块一致，没有超过 SDR 白点的内容时走线性 sRGB 路径
+    // 统计画面峰值；与输出模块一致，没有超过 SDR 白点的内容时按纯 SDR 直接缩放
     float framePeak = 0.0f;
     for (size_t i = 0; i < pixelCount * 4; ++i) {
         if ((i & 3) == 3) {
@@ -151,44 +87,38 @@ std::vector<uint8_t> ConvertCapturedFrameToSdr8(const CapturedFrame &frame, floa
             framePeak = value;
         }
     }
-    const bool useHlgPath = framePeak > lw * 1.01f;
-    const float peak = std::clamp(framePeak, lw, kReferencePeakNits / kScRgbReferenceWhiteNits);
-    const float peakLinear = Bt1886Eotf(HlgOetf(peak * kScRgbReferenceWhiteNits / kReferencePeakNits));
-    LOG("GpuFrame: 画面峰值 " + std::to_string(framePeak * kScRgbReferenceWhiteNits) + " nits, 使用" +
-        (useHlgPath ? "HLG 高光压缩路径" : "线性 sRGB 路径"));
+    const bool needsToneMap = framePeak > sdrWhiteScRgb * 1.01f;
+    LOG("GpuFrame: 画面峰值 " + std::to_string(framePeak * kScRgbWhiteNits) + " nits, 使用" +
+        (needsToneMap ? " BT.2446-1 方法 C 色调映射" : "线性 sRGB 直通"));
+
+    const std::unique_ptr<Bt2446MethodC> methodC = needsToneMap ? Bt2446MethodC::Create() : nullptr;
 
     for (size_t i = 0; i < pixelCount; ++i) {
-        const Float3 scRgb = {
-            (std::max)(HalfToFloat(source[i * 4 + 0]), 0.0f),
-            (std::max)(HalfToFloat(source[i * 4 + 1]), 0.0f),
-            (std::max)(HalfToFloat(source[i * 4 + 2]), 0.0f)
-        };
+        const float r = (std::max)(HalfToFloat(source[i * 4 + 0]), 0.0f);
+        const float g = (std::max)(HalfToFloat(source[i * 4 + 1]), 0.0f);
+        const float b = (std::max)(HalfToFloat(source[i * 4 + 2]), 0.0f);
 
-        if (!useHlgPath) {
-            pixels[i * 4 + 0] = FloatToByte(LinearToSrgb(scRgb.r / lw));
-            pixels[i * 4 + 1] = FloatToByte(LinearToSrgb(scRgb.g / lw));
-            pixels[i * 4 + 2] = FloatToByte(LinearToSrgb(scRgb.b / lw));
-            pixels[i * 4 + 3] = 255;
-            continue;
+        float srgbR = 0.0f;
+        float srgbG = 0.0f;
+        float srgbB = 0.0f;
+        if (!needsToneMap) {
+            srgbR = LinearToSrgb(r / sdrWhiteScRgb);
+            srgbG = LinearToSrgb(g / sdrWhiteScRgb);
+            srgbB = LinearToSrgb(b / sdrWhiteScRgb);
+        } else {
+            // 方法 C 输出线性 SDR 光（1.0 = SDR 峰值），需再做 sRGB 编码才是 8bit 像素值
+            float linearR = 0.0f;
+            float linearG = 0.0f;
+            float linearB = 0.0f;
+            methodC->MapToSdrLinear(r, g, b, linearR, linearG, linearB);
+            srgbR = LinearToSrgb(linearR);
+            srgbG = LinearToSrgb(linearG);
+            srgbB = LinearToSrgb(linearB);
         }
 
-        const Float3 bt2020 = SrgbLinearToBt2020Linear(scRgb);
-        const Float3 hlg = {
-            HlgOetf(bt2020.r * kScRgbReferenceWhiteNits / kReferencePeakNits),
-            HlgOetf(bt2020.g * kScRgbReferenceWhiteNits / kReferencePeakNits),
-            HlgOetf(bt2020.b * kScRgbReferenceWhiteNits / kReferencePeakNits)
-        };
-        const Float3 interpreted = {Bt1886Eotf(hlg.r), Bt1886Eotf(hlg.g), Bt1886Eotf(hlg.b)};
-        const Float3 bt709Raw = Bt2020LinearToBt709Linear(interpreted);
-        const Float3 bt709ToneMapped = {
-            ToneMapHdrToSdrLinear(bt709Raw.r, sdrWhiteLinear, peakLinear),
-            ToneMapHdrToSdrLinear(bt709Raw.g, sdrWhiteLinear, peakLinear),
-            ToneMapHdrToSdrLinear(bt709Raw.b, sdrWhiteLinear, peakLinear)
-        };
-
-        pixels[i * 4 + 0] = FloatToByte(Bt1886Oetf(bt709ToneMapped.r));
-        pixels[i * 4 + 1] = FloatToByte(Bt1886Oetf(bt709ToneMapped.g));
-        pixels[i * 4 + 2] = FloatToByte(Bt1886Oetf(bt709ToneMapped.b));
+        pixels[i * 4 + 0] = FloatToByte(srgbR);
+        pixels[i * 4 + 1] = FloatToByte(srgbG);
+        pixels[i * 4 + 2] = FloatToByte(srgbB);
         pixels[i * 4 + 3] = 255;
     }
 

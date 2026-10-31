@@ -1,4 +1,5 @@
 #include "OutputModule.h"
+#include "Bt2446MethodC.h"
 #include "GpuFrame.h"
 #include "Logger.h"
 
@@ -17,9 +18,6 @@
 
 namespace {
 
-constexpr float kBt1886Gamma = 2.4f;
-constexpr float kReferencePeakNits = 1000.0f;
-constexpr float kSdrReferenceWhiteNits = 80.0f;
 constexpr float kMinLw = 0.000001f;
 constexpr float kDefaultLw = 1.0f;
 constexpr GLuint kLocalSizeX = 16;
@@ -88,33 +86,36 @@ layout(std430, binding = 0) buffer OutputBuffer {
 
 uniform ivec2 u_selectionOrigin;
 uniform ivec2 u_outputSize;
+// 系统 SDR 白点，单位 scRGB（1.0 = 80 cd/m²）；用于判断内容是否真的含有 HDR 高光
 uniform float u_lw;
-uniform float u_peak;
-uniform bool u_useHlgPath;
 uniform bool u_passthroughSdr;
+uniform bool u_toneMap;
 
-const float kBt1886Gamma = 2.4;
-const float kHlgA = 0.17883277;
-const float kHlgB = 1.0 - 4.0 * kHlgA;
-const float kHlgC = 0.55991073;
-const float kReferencePeakNits = 1000.0;
-const float kScRgbReferenceWhiteNits = 80.0;
-const float kMinWhiteLinear = 0.000001;
-const float kTargetWhiteSignal = 0.9345;
+// BT.2446-1 方法 C 参数（CPU 侧按方法默认参数求解后传入）
+uniform float u_alpha;
+uniform float u_k1;
+uniform float u_k2;
+uniform float u_k3;
+uniform float u_k4;
+uniform float u_kneeHdrNits;
+uniform float u_hdrPeakNits;
+uniform float u_sdrPeakNits;
+
+const float kScRgbWhiteNits = 80.0;
 const float kSrgbLinearThreshold = 0.0031308;
 const float kSrgbLowSlope = 12.92;
 const float kSrgbHighScale = 1.055;
 const float kSrgbHighOffset = 0.055;
 
-vec3 SrgbLinearToBt2020Linear(vec3 color) {
+vec3 Rec709ToRec2020(vec3 color) {
     return vec3(
-        0.6274040 * color.r + 0.3292820 * color.g + 0.0433136 * color.b,
+        0.6274030 * color.r + 0.3292830 * color.g + 0.0433136 * color.b,
         0.0690970 * color.r + 0.9195400 * color.g + 0.0113612 * color.b,
         0.0163916 * color.r + 0.0880132 * color.g + 0.8955950 * color.b
     );
 }
 
-vec3 Bt2020LinearToBt709Linear(vec3 color) {
+vec3 Rec2020ToRec709(vec3 color) {
     return vec3(
         1.6604910 * color.r - 0.5876411 * color.g - 0.0728499 * color.b,
         -0.1245505 * color.r + 1.1328999 * color.g - 0.0083494 * color.b,
@@ -122,47 +123,67 @@ vec3 Bt2020LinearToBt709Linear(vec3 color) {
     );
 }
 
-float Clamp01(float value) {
-    return clamp(value, 0.0, 1.0);
+vec3 Rec2020ToXyz(vec3 color) {
+    return vec3(
+        0.6370 * color.r + 0.1446 * color.g + 0.1689 * color.b,
+        0.2627 * color.r + 0.6780 * color.g + 0.0593 * color.b,
+        0.0000 * color.r + 0.0281 * color.g + 1.0610 * color.b
+    );
 }
 
-float HlgOetf(float linearValue) {
-    linearValue = Clamp01(linearValue);
-    if (linearValue <= (1.0 / 12.0)) {
-        return sqrt(3.0 * linearValue);
+vec3 XyzToRec2020(vec3 color) {
+    return vec3(
+        1.7167 * color.r - 0.3557 * color.g - 0.2534 * color.b,
+        -0.6667 * color.r + 1.6165 * color.g + 0.0158 * color.b,
+        0.0176 * color.r - 0.0428 * color.g + 0.9421 * color.b
+    );
+}
+
+// §6.1.2：映射前串扰降饱和，映射后用逆矩阵还原
+vec3 Crosstalk(vec3 color, float alpha) {
+    float diagonal = 1.0 - 2.0 * alpha;
+    return vec3(
+        diagonal * color.r + alpha * color.g + alpha * color.b,
+        alpha * color.r + diagonal * color.g + alpha * color.b,
+        alpha * color.r + alpha * color.g + diagonal * color.b
+    );
+}
+
+vec3 InverseCrosstalk(vec3 color, float alpha) {
+    float mean = (color.r + color.g + color.b) / 3.0;
+    float scale = 1.0 / max(1.0 - 3.0 * alpha, 0.01);
+    return (color - vec3(mean)) * scale + vec3(mean);
+}
+
+// 输入：BT.2020 线性光，1.0 = HDR 峰值；输出：BT.2020 线性光，1.0 = SDR 峰值
+vec3 MapMethodC(vec3 normalized2020) {
+    vec3 crosstalked = Crosstalk(normalized2020 * u_hdrPeakNits, u_alpha);
+    vec3 xyz = Rec2020ToXyz(crosstalked);
+    float sum = xyz.x + xyz.y + xyz.z;
+    if (xyz.y <= 0.0 || sum <= 0.00001) {
+        // 退化的无亮度像素：退化为线性增益，避免后续除以零
+        return normalized2020 * (u_k1 * u_hdrPeakNits / u_sdrPeakNits);
     }
-    return kHlgA * log(12.0 * linearValue - kHlgB) + kHlgC;
-}
 
-float Bt1886Eotf(float signalValue) {
-    return pow(Clamp01(signalValue), kBt1886Gamma);
-}
+    vec2 xy = xyz.xy / sum;
 
-float Bt1886Oetf(float linearValue) {
-    return pow(Clamp01(linearValue), 1.0 / kBt1886Gamma);
-}
-
-float ToneMapHdrToSdrLinear(float linearValue, float whiteLinear, float peakLinear) {
-    whiteLinear = max(whiteLinear, kMinWhiteLinear);
-    linearValue = max(linearValue, 0.0);
-
-    float normalized = linearValue / whiteLinear;
-    float targetWhiteLinear = Bt1886Eotf(kTargetWhiteSignal);
-    if (normalized <= 1.0) {
-        return normalized * targetWhiteLinear;
+    float mappedY;
+    if (xyz.y < u_kneeHdrNits) {
+        mappedY = u_k1 * xyz.y;
+    } else {
+        mappedY = u_k2 * log(max(xyz.y / u_kneeHdrNits - u_k3, 0.0001)) + u_k4;
     }
 
-    // Roll values above SDR white into the remaining SDR headroom instead of
-    // clipping them directly. The shoulder ends at the actual content peak so
-    // the brightest pixel in the selection reaches 1.0.
-    float peakNormalized = max(peakLinear / whiteLinear, 1.000001);
-    float t = clamp((normalized - 1.0) / (peakNormalized - 1.0), 0.0, 1.0);
-    float shoulder = 1.0 - pow(1.0 - t, 2.0);
-    return mix(targetWhiteLinear, 1.0, shoulder);
+    float inverseY = 1.0 / max(xy.y, 0.00001);
+    vec3 xyzSdr = vec3(xy.x * inverseY * mappedY, mappedY, (1.0 - xy.x - xy.y) * inverseY * mappedY);
+    vec3 rec2020Sdr = XyzToRec2020(xyzSdr);
+
+    // 逆串扰还原饱和度后，归一化到 SDR 峰值（1.0 = u_sdrPeakNits）
+    return InverseCrosstalk(rec2020Sdr, u_alpha) / u_sdrPeakNits;
 }
 
 float LinearToSrgb(float linearValue) {
-    linearValue = Clamp01(linearValue);
+    linearValue = clamp(linearValue, 0.0, 1.0);
     if (linearValue <= kSrgbLinearThreshold) {
         return linearValue * kSrgbLowSlope;
     }
@@ -181,44 +202,24 @@ void main() {
 
     if (u_passthroughSdr) {
         outputColor = clamp(color, vec3(0.0), vec3(1.0));
-    } else if (u_useHlgPath) {
-        vec3 bt2020Linear = SrgbLinearToBt2020Linear(color);
-        // Windows advanced color scRGB capture is absolute-referred:
-        // a linear value of 1.0 corresponds to 80 nits.
-        // The HLG/BT.1886 conversion compresses highlights, but the clipboard
-        // result is SDR. Therefore the current Windows SDR white level must be
-        // re-normalized back to 1.0, otherwise ordinary system white becomes a
-        // middle gray whenever the selection contains HDR highlights.
-        vec3 hlg = vec3(
-            HlgOetf(bt2020Linear.r * kScRgbReferenceWhiteNits / kReferencePeakNits),
-            HlgOetf(bt2020Linear.g * kScRgbReferenceWhiteNits / kReferencePeakNits),
-            HlgOetf(bt2020Linear.b * kScRgbReferenceWhiteNits / kReferencePeakNits)
-        );
-        float sdrWhiteHlg = HlgOetf(u_lw * kScRgbReferenceWhiteNits / kReferencePeakNits);
-        float sdrWhiteLinear = max(Bt1886Eotf(sdrWhiteHlg), kMinWhiteLinear);
-        float peakLinear = Bt1886Eotf(HlgOetf(u_peak * kScRgbReferenceWhiteNits / kReferencePeakNits));
-        vec3 interpretedLinear = vec3(
-            Bt1886Eotf(hlg.r),
-            Bt1886Eotf(hlg.g),
-            Bt1886Eotf(hlg.b)
-        );
-        vec3 bt709LinearRaw = Bt2020LinearToBt709Linear(interpretedLinear);
-        vec3 bt709Linear = vec3(
-            ToneMapHdrToSdrLinear(bt709LinearRaw.r, sdrWhiteLinear, peakLinear),
-            ToneMapHdrToSdrLinear(bt709LinearRaw.g, sdrWhiteLinear, peakLinear),
-            ToneMapHdrToSdrLinear(bt709LinearRaw.b, sdrWhiteLinear, peakLinear)
-        );
-        outputColor = vec3(
-            Bt1886Oetf(bt709Linear.r),
-            Bt1886Oetf(bt709Linear.g),
-            Bt1886Oetf(bt709Linear.b)
-        );
-    } else {
-        vec3 normalized = clamp(color / u_lw, vec3(0.0), vec3(1.0));
+    } else if (!u_toneMap) {
+        // 选区里没有超过 SDR 白点的内容：按纯 SDR 缩放，保持原样输出
+        vec3 normalized = clamp(color / max(u_lw, 0.000001), vec3(0.0), vec3(1.0));
         outputColor = vec3(
             LinearToSrgb(normalized.r),
             LinearToSrgb(normalized.g),
             LinearToSrgb(normalized.b)
+        );
+    } else {
+        // scRGB 线性光 → 绝对亮度（1.0 = 80 cd/m²）→ BT.2020 基色的线性光
+        vec3 nits = color * kScRgbWhiteNits;
+        vec3 normalized2020 = Rec709ToRec2020(nits) / u_hdrPeakNits;
+        // 方法 C 输出线性 SDR 光（1.0 = SDR 峰值），本项目的输出是 8bit sRGB 编码，需要再做 OETF
+        vec3 sdrLinear = Rec2020ToRec709(MapMethodC(normalized2020));
+        outputColor = vec3(
+            LinearToSrgb(sdrLinear.r),
+            LinearToSrgb(sdrLinear.g),
+            LinearToSrgb(sdrLinear.b)
         );
     }
 
@@ -358,12 +359,12 @@ float ComputeLw(float sdrWhiteNits) {
     if (sdrWhiteNits <= 0.0f) {
         return kDefaultLw;
     }
-    return (std::max)(sdrWhiteNits / kSdrReferenceWhiteNits, kMinLw);
+    return (std::max)(sdrWhiteNits / kScRgbWhiteNits, kMinLw);
 }
 
 float ResolveSdrWhiteNits(float sdrWhiteNits) {
-    if (sdrWhiteNits < (kMinLw * kSdrReferenceWhiteNits)) {
-        return kSdrReferenceWhiteNits;
+    if (sdrWhiteNits < (kMinLw * kScRgbWhiteNits)) {
+        return kScRgbWhiteNits;
     }
     return sdrWhiteNits;
 }
@@ -407,6 +408,14 @@ public:
         m_detectProgram  = CompileComputeProgram(kDetectionShaderSource);
         m_processProgram = CompileComputeProgram(kProcessingShaderSource);
         eglMakeCurrent(m_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
+        m_methodC = Bt2446MethodC::Create();
+        const Bt2446MethodCParams &params = m_methodC->Params();
+        LOG("BT.2446-1 method C (default): alpha=" + std::to_string(params.alpha) +
+            ", k1=" + std::to_string(params.k1) + ", k2=" + std::to_string(params.k2) +
+            ", k3=" + std::to_string(params.k3) + ", k4=" + std::to_string(params.k4) +
+            ", knee=" + std::to_string(params.kneeHdrNits) + " nits, HDR peak=" +
+            std::to_string(params.hdrPeakNits) + " nits, SDR peak=" + std::to_string(params.sdrPeakNits) + " nits");
     }
 
     ~OutputModuleImpl() {
@@ -490,14 +499,14 @@ private:
         float selectionPeak = 0.0f;
         std::memcpy(&selectionPeak, mappedDetection, sizeof(selectionPeak));
         glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
-        const bool useHlgPath = !usePassThroughSdr && selectionPeak > lw * 1.01f; // 容差
-        // HLG 编码以 1000nit 为上限，超出部分本就会被裁剪到 1.0
-        const float peak = std::clamp(selectionPeak, lw, kReferencePeakNits / kSdrReferenceWhiteNits);
+        const bool useToneMap = !usePassThroughSdr && selectionPeak > lw * 1.01f; // 容差
 
         glGenBuffers(1, &outputBuffer.id);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputBuffer.id);
         glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(outputPixels * sizeof(uint32_t)), nullptr,
                      GL_DYNAMIC_COPY);
+
+        const Bt2446MethodCParams &params = m_methodC->Params();
 
         glUseProgram(m_processProgram);
         glActiveTexture(GL_TEXTURE0);
@@ -506,9 +515,16 @@ private:
         glUniform2i(glGetUniformLocation(m_processProgram, "u_selectionOrigin"), selection.Left(), selection.Top());
         glUniform2i(glGetUniformLocation(m_processProgram, "u_outputSize"), outputWidth, outputHeight);
         glUniform1f(glGetUniformLocation(m_processProgram, "u_lw"), lw);
-        glUniform1f(glGetUniformLocation(m_processProgram, "u_peak"), peak);
-        glUniform1i(glGetUniformLocation(m_processProgram, "u_useHlgPath"), useHlgPath ? 1 : 0);
         glUniform1i(glGetUniformLocation(m_processProgram, "u_passthroughSdr"), usePassThroughSdr ? 1 : 0);
+        glUniform1i(glGetUniformLocation(m_processProgram, "u_toneMap"), useToneMap ? 1 : 0);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_alpha"), params.alpha);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_k1"), params.k1);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_k2"), params.k2);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_k3"), params.k3);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_k4"), params.k4);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_kneeHdrNits"), params.kneeHdrNits);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_hdrPeakNits"), params.hdrPeakNits);
+        glUniform1f(glGetUniformLocation(m_processProgram, "u_sdrPeakNits"), params.sdrPeakNits);
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, outputBuffer.id);
         glDispatchCompute(dispatchX, dispatchY, 1);
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
@@ -531,11 +547,10 @@ private:
 
         if (usePassThroughSdr) {
             LOG("Compute shader output path selected: SDR 8bit passthrough");
-        } else if (useHlgPath) {
-            LOG("Compute shader output path selected: HLG. Detection still uses the current SDR white threshold, "
-                "HLG encoding uses the fixed scRGB absolute scale (1.0 = 80 nits), SDR white maps to 0.9345, "
-                "and HDR highlights up to the selection peak (" + std::to_string(peak * kSdrReferenceWhiteNits) +
-                " nits) are compressed into the remaining headroom.");
+        } else if (useToneMap) {
+            LOG("Compute shader output path selected: BT.2446-1 method C (default parameters). "
+                "Selection peak=" + std::to_string(selectionPeak * kScRgbWhiteNits) +
+                " nits, HDR reference white 203 nits maps to 96% SDR signal, output encoded as sRGB.");
         } else {
             LOG("Compute shader output path selected: linear-sRGB");
         }
@@ -547,6 +562,7 @@ private:
     EGLContext m_context = EGL_NO_CONTEXT;
     GLuint m_detectProgram  = 0;
     GLuint m_processProgram = 0;
+    std::unique_ptr<Bt2446MethodC> m_methodC;
 };
 
 } // namespace
